@@ -1,0 +1,29 @@
+defaults:
+  targets:
+    WIDE_CENTER: 50
+    WIDE_LEFT: 20
+    WIDE_RIGHT: 20
+    MEDIUM: 15
+    CLOSEUP: 10
+    BEHIND_GOAL: 5
+    AERIAL: 3
+    OTHER: 0
+
+sampling:
+  interval_seconds: 2.0
+
+browser:
+  headless: false
+  viewport_width: 1280
+  viewport_height: 720
+  timeout_ms: 30000
+
+openai:
+  model: gpt-4o-mini
+  detail: low
+  max_concurrent: 3
+  cost_per_frame: 0.00007
+
+output:
+  base_dir: ./recordings
+  thumbnail_width: 320

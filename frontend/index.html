@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Footballia Screenshotter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== VIEW 1: MATCH SELECTOR ===== -->
+        <div id="view-select" class="view active">
+            <header class="page-header">
+                <div class="logo">&#9917;</div>
+                <div>
+                    <h1>Footballia Screenshotter</h1>
+                    <p class="subtitle">Atletico de Madrid &middot; 2024-25 La Liga</p>
+                </div>
+            </header>
+
+            <div class="search-bar">
+                <input type="text" id="match-search" placeholder="Search matches..." autocomplete="off" />
+            </div>
+
+            <div class="table-wrap">
+                <table class="match-table" id="match-table">
+                    <thead>
+                        <tr>
+                            <th class="col-md">MD</th>
+                            <th>Date</th>
+                            <th>H/A</th>
+                            <th>Opponent</th>
+                            <th class="col-score">Score</th>
+                            <th>Result</th>
+                            <th>URL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="match-tbody">
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="hint">Select a match to begin. Matches without a Footballia URL are disabled.</p>
+        </div>
+
+        <!-- ===== VIEW 2: CONFIGURATION ===== -->
+        <div id="view-config" class="view">
+            <button class="back-btn" onclick="showView('select')">&#8592; Back</button>
+
+            <div class="match-header">
+                <h2 id="config-match-title"></h2>
+                <p class="match-date" id="config-match-date"></p>
+            </div>
+
+            <div class="section">
+                <h3>Screenshot Targets</h3>
+                <p class="section-desc">Set how many screenshots you need for each camera angle.</p>
+
+                <div class="target-grid" id="target-inputs">
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section">
+                <h3>Starting Position</h3>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="start-pos" value="beginning" checked />
+                        <span>Start from beginning</span>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="start-pos" value="custom" />
+                        <span>Start from specific time</span>
+                    </label>
+                </div>
+                <input type="text" id="start-time-input" class="time-input"
+                       placeholder="MM:SS  e.g. 35:00" disabled />
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="summary-bar" id="summary-bar">
+                Total: <span class="mono" id="total-count">0</span> screenshots &middot;
+                Est. cost: <span class="mono" id="est-cost">$0.000</span>
+            </div>
+
+            <button class="btn-primary" id="start-btn" onclick="startCapture()">
+                &#9654; Start Capture
+            </button>
+        </div>
+
+        <!-- ===== VIEW 3: LIVE DASHBOARD ===== -->
+        <div id="view-dashboard" class="view">
+            <div id="dashboard-capturing">
+                <div class="dash-header">
+                    <h2 id="dash-match-title"></h2>
+                    <p class="dash-meta">
+                        Video: <span class="mono" id="video-time">00:00</span>
+                        / <span class="mono" id="video-duration">00:00</span>
+                        &middot; <span id="video-part">Part 1 of 1</span>
+                    </p>
+                </div>
+
+                <div class="overall-progress">
+                    <div class="progress-bar-container large">
+                        <div class="progress-bar-fill" id="overall-bar"></div>
+                    </div>
+                    <span class="mono overall-pct" id="overall-pct">0%</span>
+                </div>
+
+                <table class="progress-table">
+                    <thead>
+                        <tr>
+                            <th>Camera Angle</th>
+                            <th class="col-num">Target</th>
+                            <th class="col-num">Captured</th>
+                            <th>Progress</th>
+                        </tr>
+                    </thead>
+                    <tbody id="progress-tbody">
+                    </tbody>
+                </table>
+
+                <div class="dash-totals">
+                    Total: <span class="mono" id="total-progress">0 / 0</span> captured
+                    &middot; <span class="mono" id="api-cost">$0.0000</span> spent
+                </div>
+
+                <div class="dash-controls">
+                    <button class="btn-pause" id="btn-pause" onclick="sendAction('pause')">&#9208; Pause</button>
+                    <button class="btn-stop" id="btn-stop" onclick="sendAction('stop')">&#9632; Stop</button>
+                </div>
+
+                <div class="latest-capture">
+                    <h4>Latest capture</h4>
+                    <div class="latest-frame">
+                        <img id="latest-thumbnail" src="" alt="Latest frame" />
+                        <p class="mono" id="latest-info">Waiting for first frame...</p>
+                    </div>
+                </div>
+
+                <div class="activity-log-section">
+                    <h4>Activity log</h4>
+                    <div class="activity-log" id="activity-log">
+                    </div>
+                </div>
+            </div>
+
+            <!-- PAUSE OVERLAY -->
+            <div class="pause-overlay" id="pause-overlay">
+                <div class="pause-card">
+                    <div class="pause-icon">&#9208;</div>
+                    <h3>PAUSED</h3>
+                    <p class="pause-sub">Paused at video time</p>
+                    <div class="pause-time" id="pause-time-display">00:00</div>
+                    <div class="pause-copy-row">
+                        <span class="pause-copy-label">Copy this time to resume later</span>
+                        <button class="copy-btn" id="copy-time-btn" onclick="copyPauseTime()">Copy</button>
+                    </div>
+                    <p class="pause-info" id="pause-info">Progress saved. 0 screenshots captured so far.</p>
+                    <div class="pause-actions">
+                        <button class="btn-resume" onclick="sendAction('resume')">&#9654; Resume</button>
+                        <button class="btn-stop-save" onclick="sendAction('stop')">&#9632; Stop &amp; Save</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- COMPLETED STATE -->
+            <div id="dashboard-completed" class="completed-view" style="display:none;">
+                <div class="completed-header">
+                    <span class="completed-icon">&#9989;</span>
+                    <h2>Capture Complete</h2>
+                </div>
+                <p class="completed-match" id="completed-match-title"></p>
+
+                <table class="progress-table">
+                    <thead>
+                        <tr>
+                            <th>Camera Angle</th>
+                            <th class="col-num">Target</th>
+                            <th class="col-num">Captured</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="completed-tbody">
+                    </tbody>
+                </table>
+
+                <div class="completed-stats">
+                    <p>Duration: <span class="mono" id="completed-duration"></span>
+                       &middot; API cost: <span class="mono" id="completed-cost"></span></p>
+                    <p>Output: <span class="mono" id="completed-output-dir"></span></p>
+                </div>
+
+                <div class="completed-actions">
+                    <button class="btn-secondary" onclick="showView('select')">&#8592; New Capture</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
