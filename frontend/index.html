@@ -170,6 +170,7 @@
             <div class="match-header">
                 <h2 id="config-match-title"></h2>
                 <p class="match-date" id="config-match-date"></p>
+                <span class="config-lineup-info" id="config-lineup-info" style="display:none;"></span>
             </div>
 
             <!-- Task selector -->
@@ -185,6 +186,63 @@
                 <h3>AI Provider</h3>
                 <p class="section-desc">Choose which AI service classifies your frames.</p>
                 <div class="provider-cards" id="provider-cards"></div>
+            </div>
+            <div class="divider"></div>
+
+            <!-- Capture Mode -->
+            <div class="section" id="capture-mode-section">
+                <h3>Capture Mode</h3>
+                <p class="section-desc">Choose what parts of the match to capture.</p>
+
+                <div class="mode-cards" id="mode-cards">
+                    <div class="mode-card selected" onclick="selectCaptureMode('full_match')">
+                        <div class="mode-icon">&#x1F4F9;</div>
+                        <div class="mode-info">
+                            <div class="mode-name">Full Match</div>
+                            <div class="mode-desc">Sample throughout the entire match</div>
+                        </div>
+                    </div>
+
+                    <div class="mode-card" id="mode-goals-only" onclick="selectCaptureMode('goals_only')">
+                        <div class="mode-icon">&#x26BD;</div>
+                        <div class="mode-info">
+                            <div class="mode-name">Goals Only</div>
+                            <div class="mode-desc">Capture around goal times only</div>
+                        </div>
+                        <span class="mode-badge" id="goals-badge" style="display:none;"></span>
+                    </div>
+
+                    <div class="mode-card" onclick="selectCaptureMode('custom_times')">
+                        <div class="mode-icon">&#x2702;&#xFE0F;</div>
+                        <div class="mode-info">
+                            <div class="mode-name">Custom Time Ranges</div>
+                            <div class="mode-desc">Specify exact time windows to capture</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Goals Only details -->
+                <div id="goals-detail" class="mode-detail" style="display:none;">
+                    <div class="goals-list" id="goals-list"></div>
+                    <div class="goal-window-setting">
+                        <label>Capture window:
+                            <input type="number" id="goal-window" value="30" min="10" max="120" /> seconds before/after each goal
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Custom times detail -->
+                <div id="custom-times-detail" class="mode-detail" style="display:none;">
+                    <div id="custom-ranges">
+                        <div class="custom-range-row">
+                            <input type="text" placeholder="Start (MM:SS)" class="time-input custom-start" />
+                            <span>to</span>
+                            <input type="text" placeholder="End (MM:SS)" class="time-input custom-end" />
+                            <button class="btn-icon" onclick="removeCustomRange(this)">&#x2715;</button>
+                        </div>
+                    </div>
+                    <button class="btn-text" onclick="addCustomRange()">+ Add time range</button>
+                </div>
             </div>
             <div class="divider"></div>
 
@@ -290,6 +348,84 @@
                     <p>Output: <span class="mono" id="completed-output-dir"></span></p>
                 </div>
                 <div class="completed-actions"><button class="btn-secondary" onclick="showView('home')">&#8592; Home</button></div>
+                <div id="completion-actions" class="completion-actions" style="display:none;">
+                    <!-- Populated by showCompletionActions() -->
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== VIEW 5: GALLERY / REVIEW ===== -->
+        <div id="view-gallery" class="view">
+            <button class="back-btn" onclick="exitGallery()">&#8592; Done</button>
+
+            <div class="gallery-header">
+                <h2 id="gallery-title">Review Classifications</h2>
+                <div class="gallery-progress">
+                    <span id="gallery-progress-text">0 / 0 reviewed</span>
+                    <div class="gallery-progress-bar">
+                        <div class="gallery-progress-fill" id="gallery-progress-fill"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Review mode controls (hidden in manual mode) -->
+            <div class="review-controls" id="review-controls">
+                <div class="confidence-filter">
+                    <label>Show frames below confidence:
+                        <input type="range" id="confidence-slider" min="50" max="100" value="85"
+                               oninput="updateConfidenceFilter(this.value)" />
+                        <span id="confidence-value">85%</span>
+                    </label>
+                </div>
+                <div class="review-actions">
+                    <button class="btn-secondary" onclick="batchAccept()">
+                        &#10003; Accept all above <span id="batch-threshold">90</span>%
+                    </button>
+                    <button class="btn-text" onclick="showAllFrames()">Show all frames</button>
+                </div>
+            </div>
+
+            <!-- Main gallery area -->
+            <div class="gallery-main">
+                <!-- Large preview -->
+                <div class="gallery-preview">
+                    <img id="gallery-image" src="" alt="Frame preview" />
+                    <div class="gallery-frame-info">
+                        <span id="gallery-filename"></span>
+                        <span id="gallery-time"></span>
+                    </div>
+                    <!-- AI label (review mode) -->
+                    <div class="gallery-ai-label" id="gallery-ai-label" style="display:none;">
+                        <span class="ai-label-tag">AI:</span>
+                        <span id="gallery-ai-type"></span>
+                        <span id="gallery-ai-confidence"></span>
+                        <span id="gallery-ai-reasoning" class="ai-reasoning"></span>
+                    </div>
+                    <!-- Anomaly warning -->
+                    <div class="gallery-anomaly" id="gallery-anomaly" style="display:none;">
+                        &#9888;&#65039; <span id="gallery-anomaly-text"></span>
+                    </div>
+                </div>
+
+                <!-- Category buttons -->
+                <div class="gallery-buttons" id="gallery-buttons">
+                    <!-- Populated by JS from active task categories -->
+                </div>
+
+                <div class="gallery-shortcuts">
+                    Press <kbd>1</kbd>-<kbd>8</kbd> to classify &middot; <kbd>&#8592;</kbd><kbd>&#8594;</kbd> navigate &middot;
+                    <kbd>S</kbd> skip &middot; <kbd>Ctrl+Z</kbd> undo
+                </div>
+
+                <!-- Filmstrip -->
+                <div class="gallery-filmstrip" id="gallery-filmstrip">
+                    <!-- Populated by JS — row of thumbnails -->
+                </div>
+            </div>
+
+            <!-- Category stats sidebar -->
+            <div class="gallery-stats" id="gallery-stats">
+                <!-- Populated by JS — count per category -->
             </div>
         </div>
 

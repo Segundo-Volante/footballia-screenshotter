@@ -82,6 +82,31 @@ class MatchDB:
         """)
         self.conn.commit()
 
+        # ── Migrations: add columns if missing ──
+        self._migrate_add_column("matches", "home_lineup_json", "TEXT DEFAULT ''")
+        self._migrate_add_column("matches", "away_lineup_json", "TEXT DEFAULT ''")
+        self._migrate_add_column("matches", "home_coach_json", "TEXT DEFAULT ''")
+        self._migrate_add_column("matches", "away_coach_json", "TEXT DEFAULT ''")
+        self._migrate_add_column("matches", "goals_json", "TEXT DEFAULT '[]'")
+        self._migrate_add_column("matches", "result_json", "TEXT DEFAULT ''")
+
+        self._migrate_add_column("frames", "anomaly", "INTEGER DEFAULT 0")
+        self._migrate_add_column("frames", "consistency_note", "TEXT DEFAULT ''")
+
+        self._migrate_add_column("captures", "capture_mode", "TEXT DEFAULT 'full_match'")
+        self._migrate_add_column("captures", "task_id", "TEXT DEFAULT 'camera_angle'")
+
+    def _migrate_add_column(self, table: str, column: str, definition: str):
+        """Safely add a column if it doesn't exist."""
+        try:
+            self.conn.execute(f"SELECT {column} FROM {table} LIMIT 1")
+        except Exception:
+            try:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                self.conn.commit()
+            except Exception:
+                pass  # Column might already exist
+
     # ── Match CRUD ──
 
     def get_all_matches(self) -> list[dict]:
@@ -209,6 +234,102 @@ class MatchDB:
             "SELECT * FROM frames WHERE capture_id = ? ORDER BY video_time", (capture_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Scraped data storage ──
+
+    def update_match_scraped_data(self, match_id: int, scraped: dict):
+        """Store scraped Footballia data on a match record."""
+        updates = {}
+        if scraped.get("home_lineup"):
+            updates["home_lineup_json"] = json.dumps(scraped["home_lineup"], ensure_ascii=False)
+        if scraped.get("away_lineup"):
+            updates["away_lineup_json"] = json.dumps(scraped["away_lineup"], ensure_ascii=False)
+        if scraped.get("home_coach"):
+            updates["home_coach_json"] = json.dumps(scraped["home_coach"], ensure_ascii=False)
+        if scraped.get("away_coach"):
+            updates["away_coach_json"] = json.dumps(scraped["away_coach"], ensure_ascii=False)
+        if scraped.get("goals"):
+            updates["goals_json"] = json.dumps(scraped["goals"], ensure_ascii=False)
+        if scraped.get("result"):
+            updates["result_json"] = json.dumps(scraped["result"], ensure_ascii=False)
+        if scraped.get("venue"):
+            updates["venue"] = scraped["venue"]
+        if scraped.get("stage"):
+            updates["stage"] = scraped["stage"]
+        if scraped.get("date") and not self.get_match(match_id).get("date"):
+            updates["date"] = scraped["date"]
+        if scraped.get("competition") and not self.get_match(match_id).get("competition"):
+            updates["competition"] = scraped["competition"]
+
+        if updates:
+            self.update_match(match_id, **updates)
+
+    # ── Frame review ──
+
+    def get_frames_for_review(self, capture_id: int,
+                              max_confidence: float = 1.0,
+                              only_anomalies: bool = False,
+                              only_unreviewed: bool = False) -> list[dict]:
+        """Get frames that need review, with optional filters."""
+        conditions = ["capture_id = ?"]
+        params: list = [capture_id]
+
+        if max_confidence < 1.0:
+            conditions.append("confidence < ?")
+            params.append(max_confidence)
+
+        if only_anomalies:
+            conditions.append("anomaly = 1")
+
+        if only_unreviewed:
+            conditions.append("is_reviewed = 0")
+
+        where = " AND ".join(conditions)
+        rows = self.conn.execute(
+            f"SELECT * FROM frames WHERE {where} ORDER BY video_time",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_pending_frames(self, capture_id: int) -> list[dict]:
+        """Get all frames classified as PENDING (Manual mode)."""
+        rows = self.conn.execute(
+            "SELECT * FROM frames WHERE capture_id = ? AND camera_type = 'PENDING' ORDER BY video_time",
+            (capture_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def review_frame(self, frame_id: int, new_type: str):
+        """Mark a frame as reviewed with a (possibly corrected) classification."""
+        self.conn.execute(
+            "UPDATE frames SET is_reviewed = 1, reviewed_type = ?, camera_type = ? WHERE id = ?",
+            (new_type, new_type, frame_id),
+        )
+        self.conn.commit()
+
+    def batch_accept_frames(self, capture_id: int, min_confidence: float):
+        """Accept all frames above a confidence threshold as reviewed."""
+        self.conn.execute(
+            """UPDATE frames SET is_reviewed = 1, reviewed_type = camera_type
+               WHERE capture_id = ? AND confidence >= ? AND is_reviewed = 0""",
+            (capture_id, min_confidence),
+        )
+        self.conn.commit()
+        return self.conn.total_changes
+
+    def get_review_stats(self, capture_id: int) -> dict:
+        """Get review progress statistics for a capture."""
+        row = self.conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN is_reviewed = 1 THEN 1 ELSE 0 END) as reviewed,
+                SUM(CASE WHEN is_reviewed = 0 THEN 1 ELSE 0 END) as unreviewed,
+                SUM(CASE WHEN anomaly = 1 THEN 1 ELSE 0 END) as anomalies,
+                SUM(CASE WHEN camera_type = 'PENDING' THEN 1 ELSE 0 END) as pending,
+                AVG(confidence) as avg_confidence
+            FROM frames WHERE capture_id = ?
+        """, (capture_id,)).fetchone()
+        return dict(row) if row else {}
 
     def close(self):
         self.conn.close()

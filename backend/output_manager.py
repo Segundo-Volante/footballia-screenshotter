@@ -141,3 +141,51 @@ class OutputManager:
     @property
     def output_dir(self) -> str:
         return str(self.base_path)
+
+    def move_frame(self, current_path: str, new_category: str) -> str:
+        """
+        Move a frame from its current category folder to a new one.
+        Used when user reclassifies during review.
+
+        Returns:
+            New file path as string.
+        """
+        src = Path(current_path)
+        if not src.exists():
+            logger.warning(f"Cannot move frame — file not found: {src}")
+            return current_path
+
+        dest_dir = self.base_path / new_category
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+
+        # Handle name collision
+        if dest.exists():
+            stem = src.stem
+            suffix = src.suffix
+            counter = 1
+            while dest.exists():
+                dest = dest_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        src.rename(dest)
+        logger.info(f"Moved frame: {src.name} from {src.parent.name}/ to {new_category}/")
+        return str(dest)
+
+    @staticmethod
+    def static_move_frame(current_path: str, new_category: str, base_dir: str) -> str:
+        """Static version of move_frame for use outside of an active capture session."""
+        src = Path(current_path)
+        if not src.exists():
+            return current_path
+        dest_dir = Path(base_dir) / new_category
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        if dest.exists():
+            stem, suffix = src.stem, src.suffix
+            counter = 1
+            while dest.exists():
+                dest = dest_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+        src.rename(dest)
+        return str(dest)

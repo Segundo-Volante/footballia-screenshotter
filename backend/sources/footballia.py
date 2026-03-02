@@ -9,6 +9,7 @@ from typing import Optional, Callable, Awaitable
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 from backend.sources.base import VideoSource
+from backend.footballia_scraper import FootballiaScraper
 from backend.utils import logger
 
 PROFILE_DIR = Path(".browser_profile")
@@ -26,6 +27,8 @@ class FootballiaSource(VideoSource):
         self._total_parts = 1
         self._part1_duration = 0.0
         self._url: str = ""
+        self._scraper = FootballiaScraper()
+        self.match_data: dict = {}  # Scraped page data
 
     # ── VideoSource properties ──
 
@@ -73,6 +76,30 @@ class FootballiaSource(VideoSource):
                 return False
             await self._navigate(url)
             await asyncio.sleep(3)
+
+        # ── Scrape match page data ──
+        if broadcast_fn:
+            await broadcast_fn({"type": "status", "status": "capturing", "message": "Extracting match information..."})
+
+        try:
+            self.match_data = await self._scraper.scrape_match_page(self._page)
+            self._scraper.resolve_goal_teams(self.match_data)
+
+            if broadcast_fn and self.match_data.get("scrape_success"):
+                info_parts = []
+                if self.match_data["home_lineup"]:
+                    info_parts.append(f"{len(self.match_data['home_lineup'])} + {len(self.match_data['away_lineup'])} players")
+                if self.match_data["goals"]:
+                    info_parts.append(f"{len(self.match_data['goals'])} goals")
+                if info_parts:
+                    await broadcast_fn({
+                        "type": "match_info",
+                        "data": self.match_data,
+                        "summary": f"Found: {', '.join(info_parts)}",
+                    })
+        except Exception as e:
+            logger.warning(f"Scraper failed (non-fatal): {e}")
+            self.match_data = {"scrape_success": False}
 
         # Detect parts
         await self._detect_parts()
@@ -442,6 +469,10 @@ class FootballiaSource(VideoSource):
 
         logger.error("No video element found")
         return False
+
+    def get_match_data(self) -> dict:
+        """Return scraped match page data."""
+        return self.match_data
 
     async def _is_video_paused(self) -> bool:
         try:

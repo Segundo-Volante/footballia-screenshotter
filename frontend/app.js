@@ -23,6 +23,16 @@ const state = {
     selectedTask: null,
     selectedProvider: 'openai',
     selectedPreset: null,
+    // Part 3 additions
+    galleryFrames: [],
+    galleryIndex: 0,
+    galleryMode: 'manual',
+    galleryCaptureId: null,
+    galleryHistory: [],
+    captureMode: 'full_match',
+    scrapedGoals: [],
+    scrapedData: null,
+    activeCaptureId: null,
 };
 
 // ===== VIEW SWITCHING =====
@@ -48,6 +58,11 @@ function showView(viewName) {
 
     if (viewName === 'config') {
         loadConfigView();
+    }
+
+    // Clean up gallery keyboard listener when leaving
+    if (viewName !== 'gallery') {
+        document.removeEventListener('keydown', galleryKeyHandler);
     }
 }
 
@@ -422,6 +437,10 @@ function selectMatch(match) {
     document.getElementById('config-match-date').textContent = match.date || '';
     document.getElementById('config-back-btn').onclick = () => showView('library');
 
+    if (match.id) {
+        loadScrapedData(match.id);
+    }
+
     showView('config');
 }
 
@@ -655,6 +674,9 @@ async function startCapture() {
         source_type: 'footballia',
         provider: state.selectedProvider,
         task_id: state.selectedTask || 'camera_angle',
+        capture_mode: state.captureMode,
+        goal_times: state.scrapedGoals,
+        goal_window: parseInt(document.getElementById('goal-window')?.value || '30'),
     };
 
     try {
@@ -666,6 +688,7 @@ async function startCapture() {
         const data = await res.json();
 
         if (data.status === 'started') {
+            state.activeCaptureId = data.capture_id;
             setupDashboard(match);
             showView('dashboard');
         } else {
@@ -757,6 +780,8 @@ function connectWebSocket() {
                 break;
             case 'completed':
                 showCompletionSummary(msg.summary);
+                document.getElementById('completion-actions').style.display = '';
+                showCompletionActions(msg.summary);
                 break;
             case 'error':
                 showError(msg.message);
@@ -991,6 +1016,413 @@ function showError(message) {
         confidence: 0,
     });
     console.error('Pipeline error:', message);
+}
+
+// ===== GALLERY / REVIEW =====
+
+async function openGallery(captureId, mode) {
+    state.galleryCaptureId = captureId;
+    state.galleryMode = mode;
+    state.galleryIndex = 0;
+    state.galleryHistory = [];
+
+    let url = `/api/captures/${captureId}/frames`;
+    if (mode === 'manual') {
+        url += '?only_pending=true';
+    } else {
+        const threshold = document.getElementById('confidence-slider')?.value || 85;
+        url += `?max_confidence=${threshold / 100}&only_unreviewed=true`;
+    }
+
+    const res = await fetch(url).then(r => r.json());
+    state.galleryFrames = res.frames || [];
+
+    if (state.galleryFrames.length === 0) {
+        alert(mode === 'manual'
+            ? 'No pending frames to classify.'
+            : 'No frames need review — all classifications look good!');
+        return;
+    }
+
+    document.getElementById('gallery-title').textContent =
+        mode === 'manual' ? 'Manual Classification' : 'Review Classifications';
+    document.getElementById('review-controls').style.display =
+        mode === 'review' ? '' : 'none';
+
+    renderGalleryButtons();
+    renderGalleryFrame(0);
+    renderFilmstrip();
+    updateGalleryStats();
+
+    showView('gallery');
+    document.addEventListener('keydown', galleryKeyHandler);
+}
+
+function exitGallery() {
+    document.removeEventListener('keydown', galleryKeyHandler);
+    showView('home');
+}
+
+function renderGalleryFrame(index) {
+    if (index < 0 || index >= state.galleryFrames.length) return;
+    state.galleryIndex = index;
+
+    const frame = state.galleryFrames[index];
+
+    document.getElementById('gallery-image').src = `/api/frames/${frame.id}/image`;
+    document.getElementById('gallery-filename').textContent = frame.filename || '';
+    const mins = Math.floor((frame.video_time || 0) / 60);
+    const secs = Math.floor((frame.video_time || 0) % 60);
+    document.getElementById('gallery-time').textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+    // AI label (review mode only)
+    const aiLabel = document.getElementById('gallery-ai-label');
+    if (state.galleryMode === 'review' && frame.camera_type !== 'PENDING') {
+        aiLabel.style.display = '';
+        document.getElementById('gallery-ai-type').textContent = frame.camera_type;
+        const conf = Math.round((frame.confidence || 0) * 100);
+        document.getElementById('gallery-ai-confidence').textContent = `${conf}%`;
+        try {
+            const raw = JSON.parse(frame.raw_response || '{}');
+            document.getElementById('gallery-ai-reasoning').textContent = raw.reasoning || '';
+        } catch {
+            document.getElementById('gallery-ai-reasoning').textContent = '';
+        }
+    } else {
+        aiLabel.style.display = 'none';
+    }
+
+    // Anomaly warning
+    const anomalyEl = document.getElementById('gallery-anomaly');
+    if (frame.anomaly) {
+        anomalyEl.style.display = '';
+        document.getElementById('gallery-anomaly-text').textContent =
+            frame.consistency_note || 'Possible misclassification';
+    } else {
+        anomalyEl.style.display = 'none';
+    }
+
+    // Update progress
+    const reviewed = state.galleryFrames.filter(f => f.is_reviewed).length;
+    document.getElementById('gallery-progress-text').textContent =
+        `${reviewed} / ${state.galleryFrames.length} reviewed`;
+    const pct = state.galleryFrames.length > 0
+        ? (reviewed / state.galleryFrames.length) * 100 : 0;
+    document.getElementById('gallery-progress-fill').style.width = `${pct}%`;
+
+    renderFilmstrip();
+}
+
+function renderGalleryButtons() {
+    const task = state.tasks.find(t => t.id === (state.selectedTask || 'camera_angle'));
+    const categories = task ? task.categories.map(c => c.value || c) : state.cameraTypes;
+
+    const container = document.getElementById('gallery-buttons');
+    container.innerHTML = categories.map((cat, i) => {
+        const shortLabel = cat.replace(/_/g, ' ').replace('WIDE CENTER', 'W. Center')
+            .replace('WIDE LEFT', 'W. Left').replace('WIDE RIGHT', 'W. Right')
+            .replace('BEHIND GOAL', 'Behind G.').replace('CLOSEUP', 'Close-up');
+        const keyNum = i + 1;
+        return `
+            <button class="gallery-cat-btn" data-category="${cat}"
+                    onclick="classifyCurrentFrame('${cat}')">
+                <span class="cat-key">${keyNum <= 9 ? keyNum : ''}</span>
+                <span class="cat-label">${shortLabel}</span>
+            </button>
+        `;
+    }).join('');
+}
+
+async function classifyCurrentFrame(category) {
+    const frame = state.galleryFrames[state.galleryIndex];
+    if (!frame) return;
+
+    const oldType = frame.camera_type;
+
+    await fetch(`/api/frames/${frame.id}/review`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({classified_as: category}),
+    });
+
+    frame.camera_type = category;
+    frame.reviewed_type = category;
+    frame.is_reviewed = 1;
+
+    state.galleryHistory.push({frameId: frame.id, oldType, newType: category});
+
+    const btn = document.querySelector(`.gallery-cat-btn[data-category="${category}"]`);
+    if (btn) {
+        btn.classList.add('flash');
+        setTimeout(() => btn.classList.remove('flash'), 200);
+    }
+
+    advanceToNextUnreviewed();
+    updateGalleryStats();
+}
+
+function advanceToNextUnreviewed() {
+    for (let i = state.galleryIndex + 1; i < state.galleryFrames.length; i++) {
+        if (!state.galleryFrames[i].is_reviewed) {
+            renderGalleryFrame(i);
+            return;
+        }
+    }
+    for (let i = 0; i < state.galleryIndex; i++) {
+        if (!state.galleryFrames[i].is_reviewed) {
+            renderGalleryFrame(i);
+            return;
+        }
+    }
+    const allDone = state.galleryFrames.every(f => f.is_reviewed);
+    if (allDone) {
+        alert('All frames have been classified! You can close this view.');
+    }
+}
+
+function galleryKeyHandler(e) {
+    if (state.currentView !== 'gallery') return;
+
+    if (e.key >= '1' && e.key <= '9') {
+        e.preventDefault();
+        const task = state.tasks.find(t => t.id === (state.selectedTask || 'camera_angle'));
+        const categories = task ? task.categories.map(c => c.value || c) : state.cameraTypes;
+        const index = parseInt(e.key) - 1;
+        if (index < categories.length) {
+            classifyCurrentFrame(categories[index]);
+        }
+        return;
+    }
+
+    if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (state.galleryIndex < state.galleryFrames.length - 1) {
+            renderGalleryFrame(state.galleryIndex + 1);
+        }
+        return;
+    }
+    if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (state.galleryIndex > 0) {
+            renderGalleryFrame(state.galleryIndex - 1);
+        }
+        return;
+    }
+
+    if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        classifyCurrentFrame('OTHER');
+        return;
+    }
+
+    if (e.ctrlKey && e.key === 'z') {
+        e.preventDefault();
+        undoLastClassification();
+        return;
+    }
+}
+
+async function undoLastClassification() {
+    if (state.galleryHistory.length === 0) return;
+
+    const last = state.galleryHistory.pop();
+
+    await fetch(`/api/frames/${last.frameId}/review`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({classified_as: last.oldType}),
+    });
+
+    const frame = state.galleryFrames.find(f => f.id === last.frameId);
+    if (frame) {
+        frame.camera_type = last.oldType;
+        frame.is_reviewed = last.oldType === 'PENDING' ? 0 : 1;
+
+        const idx = state.galleryFrames.indexOf(frame);
+        if (idx >= 0) renderGalleryFrame(idx);
+    }
+
+    updateGalleryStats();
+}
+
+function renderFilmstrip() {
+    const container = document.getElementById('gallery-filmstrip');
+    const windowSize = 15;
+    const start = Math.max(0, state.galleryIndex - Math.floor(windowSize / 2));
+    const end = Math.min(state.galleryFrames.length, start + windowSize);
+
+    container.innerHTML = '';
+    for (let i = start; i < end; i++) {
+        const frame = state.galleryFrames[i];
+        const thumb = document.createElement('div');
+        thumb.className = `filmstrip-thumb ${i === state.galleryIndex ? 'active' : ''}`;
+        if (frame.is_reviewed) thumb.classList.add('reviewed');
+        if (frame.anomaly) thumb.classList.add('anomaly');
+
+        thumb.innerHTML = `<img src="/api/frames/${frame.id}/image" loading="lazy" />`;
+        thumb.onclick = () => renderGalleryFrame(i);
+        container.appendChild(thumb);
+    }
+}
+
+function updateGalleryStats() {
+    const counts = {};
+    state.galleryFrames.forEach(f => {
+        const type = f.is_reviewed ? (f.reviewed_type || f.camera_type) : f.camera_type;
+        counts[type] = (counts[type] || 0) + 1;
+    });
+
+    const container = document.getElementById('gallery-stats');
+    container.innerHTML = Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([type, count]) => `
+            <div class="stat-row">
+                <span class="stat-type">${type.replace(/_/g, ' ')}</span>
+                <span class="stat-count">${count}</span>
+            </div>
+        `).join('');
+}
+
+async function batchAccept() {
+    const threshold = parseInt(document.getElementById('batch-threshold')?.textContent || '90') / 100;
+    const res = await fetch(`/api/captures/${state.galleryCaptureId}/batch-accept`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({min_confidence: threshold}),
+    });
+    const data = await res.json();
+
+    const threshold_pct = parseInt(document.getElementById('confidence-slider')?.value || '85');
+    const framesRes = await fetch(
+        `/api/captures/${state.galleryCaptureId}/frames?max_confidence=${threshold_pct / 100}&only_unreviewed=true`
+    ).then(r => r.json());
+    state.galleryFrames = framesRes.frames || [];
+
+    if (state.galleryFrames.length === 0) {
+        alert(`Accepted ${data.accepted} frames. All frames are now reviewed!`);
+        exitGallery();
+    } else {
+        state.galleryIndex = 0;
+        renderGalleryFrame(0);
+        renderFilmstrip();
+        updateGalleryStats();
+    }
+}
+
+function updateConfidenceFilter(value) {
+    document.getElementById('confidence-value').textContent = `${value}%`;
+}
+
+function showAllFrames() {
+    fetch(`/api/captures/${state.galleryCaptureId}/frames`).then(r => r.json()).then(res => {
+        state.galleryFrames = res.frames || [];
+        state.galleryIndex = 0;
+        renderGalleryFrame(0);
+        renderFilmstrip();
+        updateGalleryStats();
+    });
+}
+
+// ===== POST-CAPTURE ACTIONS =====
+
+function showCompletionActions(summary) {
+    const actionsDiv = document.getElementById('completion-actions');
+    if (!actionsDiv) return;
+
+    let html = '';
+
+    if (summary.provider === 'manual') {
+        const pendingCount = summary.counts?.PENDING || 0;
+        html += `
+            <button class="btn-primary" onclick="openGallery(${state.activeCaptureId}, 'manual')">
+                Classify ${pendingCount} Frames
+            </button>
+        `;
+    }
+
+    if (summary.provider !== 'manual') {
+        const anomalies = summary.anomalies || 0;
+        html += `
+            <button class="btn-secondary" onclick="openGallery(${state.activeCaptureId}, 'review')">
+                Review Classifications${anomalies > 0 ? ` (${anomalies} flagged)` : ''}
+            </button>
+        `;
+    }
+
+    html += `
+        <button class="btn-text" onclick="showView('home')">
+            Done — Back to Home
+        </button>
+    `;
+
+    actionsDiv.innerHTML = html;
+}
+
+// ===== CAPTURE MODE =====
+
+function selectCaptureMode(mode) {
+    state.captureMode = mode;
+
+    document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
+    event.currentTarget.classList.add('selected');
+
+    document.getElementById('goals-detail').style.display =
+        mode === 'goals_only' ? '' : 'none';
+    document.getElementById('custom-times-detail').style.display =
+        mode === 'custom_times' ? '' : 'none';
+
+    if (mode === 'goals_only' && state.scrapedGoals.length === 0) {
+        document.getElementById('goals-detail').innerHTML =
+            '<p class="warning">No goal data available. Goals will be detected after the page loads.</p>';
+    }
+}
+
+async function loadScrapedData(matchId) {
+    try {
+        const data = await fetch(`/api/matches/${matchId}/scraped`).then(r => r.json());
+        state.scrapedData = data;
+
+        state.scrapedGoals = data.goals || [];
+
+        if (state.scrapedGoals.length > 0) {
+            const badge = document.getElementById('goals-badge');
+            badge.textContent = `${state.scrapedGoals.length} goals`;
+            badge.style.display = '';
+
+            document.getElementById('goals-list').innerHTML = state.scrapedGoals
+                .map(g => `<div class="goal-item">&#x26BD; ${g.minute}' ${g.scorer}${g.team !== 'unknown' ? ` (${g.team})` : ''}</div>`)
+                .join('');
+        }
+
+        if (data.home_lineup?.length > 0 || data.away_lineup?.length > 0) {
+            const lineupInfo = document.getElementById('config-lineup-info');
+            if (lineupInfo) {
+                lineupInfo.textContent =
+                    `Lineups: ${data.home_lineup?.length || 0} + ${data.away_lineup?.length || 0} players`;
+                lineupInfo.style.display = '';
+            }
+        }
+
+    } catch (e) {
+        console.log('No scraped data available (will scrape on capture start)');
+    }
+}
+
+function addCustomRange() {
+    const container = document.getElementById('custom-ranges');
+    const row = document.createElement('div');
+    row.className = 'custom-range-row';
+    row.innerHTML = `
+        <input type="text" placeholder="Start (MM:SS)" class="time-input custom-start" />
+        <span>to</span>
+        <input type="text" placeholder="End (MM:SS)" class="time-input custom-end" />
+        <button class="btn-icon" onclick="removeCustomRange(this)">&#x2715;</button>
+    `;
+    container.appendChild(row);
+}
+
+function removeCustomRange(btn) {
+    btn.closest('.custom-range-row').remove();
 }
 
 // ===== HELPERS =====

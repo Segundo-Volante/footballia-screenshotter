@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -54,6 +56,9 @@ class CaptureRequest(BaseModel):
     source_type: str = "footballia"
     provider: str = "openai"
     task_id: str = "camera_angle"
+    capture_mode: str = "full_match"
+    goal_times: list[dict] = []
+    goal_window: int = 30
 
 
 async def broadcast(message: dict):
@@ -263,6 +268,16 @@ async def start_capture(body: CaptureRequest):
         )
         if not success:
             return {"status": "error", "message": "Failed to connect to video. Check the URL and try again."}
+
+        # Store scraped data if available
+        if hasattr(source, 'match_data') and source.match_data.get("scrape_success"):
+            if body.match_id:
+                try:
+                    sdb = MatchDB()
+                    sdb.update_match_scraped_data(body.match_id, source.match_data)
+                    sdb.close()
+                except Exception as e:
+                    logger.warning(f"Failed to store scraped data: {e}")
     else:
         return {"status": "error", "message": f"Source type '{source_type}' not yet supported"}
 
@@ -291,12 +306,15 @@ async def start_capture(body: CaptureRequest):
         capture_id=capture_id,
         provider=body.provider,
         task_id=body.task_id,
+        capture_mode=body.capture_mode,
+        goal_times=body.goal_times,
+        goal_window=body.goal_window,
     )
 
     pipeline_task = asyncio.create_task(active_pipeline.run())
-    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}")
+    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}, mode={body.capture_mode}")
 
-    return {"status": "started"}
+    return {"status": "started", "capture_id": capture_id}
 
 
 @app.post("/api/capture/pause")
@@ -331,6 +349,118 @@ async def capture_status():
             "progress": active_pipeline.get_status(),
         }
     return {"status": "idle"}
+
+
+# ── Review/Gallery routes ──
+
+@app.get("/api/captures/{capture_id}/frames")
+async def get_capture_frames(
+    capture_id: int,
+    max_confidence: float = 1.0,
+    only_anomalies: bool = False,
+    only_unreviewed: bool = False,
+    only_pending: bool = False,
+):
+    """Get frames for the Gallery/Review UI with optional filters."""
+    db = MatchDB()
+    if only_pending:
+        frames = db.get_pending_frames(capture_id)
+    else:
+        frames = db.get_frames_for_review(
+            capture_id, max_confidence, only_anomalies, only_unreviewed
+        )
+    stats = db.get_review_stats(capture_id)
+    db.close()
+    return {"frames": frames, "stats": stats}
+
+
+@app.post("/api/frames/{frame_id}/review")
+async def review_frame(frame_id: int, body: dict):
+    """Classify or reclassify a single frame."""
+    new_type = body.get("classified_as", "")
+    if not new_type:
+        return {"error": "Missing classified_as"}
+
+    db = MatchDB()
+    frame = db.conn.execute("SELECT * FROM frames WHERE id = ?", (frame_id,)).fetchone()
+    if not frame:
+        db.close()
+        return {"error": "Frame not found"}
+
+    frame = dict(frame)
+    old_type = frame["camera_type"]
+
+    # Move the file if classification changed
+    if old_type != new_type and frame["filepath"]:
+        from backend.output_manager import OutputManager
+        capture = db.conn.execute(
+            "SELECT output_dir FROM captures WHERE id = ?", (frame["capture_id"],)
+        ).fetchone()
+        if capture and capture["output_dir"]:
+            new_path = OutputManager.static_move_frame(frame["filepath"], new_type, capture["output_dir"])
+            db.conn.execute(
+                "UPDATE frames SET filepath = ? WHERE id = ?", (new_path, frame_id)
+            )
+
+    db.review_frame(frame_id, new_type)
+    db.close()
+    return {"status": "ok", "old_type": old_type, "new_type": new_type}
+
+
+@app.post("/api/captures/{capture_id}/batch-accept")
+async def batch_accept(capture_id: int, body: dict):
+    """Accept all frames above a confidence threshold."""
+    min_confidence = body.get("min_confidence", 0.9)
+    db = MatchDB()
+    count = db.batch_accept_frames(capture_id, min_confidence)
+    stats = db.get_review_stats(capture_id)
+    db.close()
+    return {"status": "ok", "accepted": count, "stats": stats}
+
+
+@app.get("/api/captures/{capture_id}/stats")
+async def get_capture_review_stats(capture_id: int):
+    """Get review statistics for a capture."""
+    db = MatchDB()
+    stats = db.get_review_stats(capture_id)
+    db.close()
+    return stats
+
+
+@app.get("/api/frames/{frame_id}/image")
+async def get_frame_image(frame_id: int):
+    """Serve a frame image file for the Gallery UI."""
+    db = MatchDB()
+    frame = db.conn.execute("SELECT filepath FROM frames WHERE id = ?", (frame_id,)).fetchone()
+    db.close()
+    if not frame or not frame["filepath"]:
+        return {"error": "Frame not found"}
+    filepath = frame["filepath"]
+    if not Path(filepath).exists():
+        return {"error": "File not found on disk"}
+    return FileResponse(filepath, media_type="image/jpeg")
+
+
+@app.get("/api/matches/{match_id}/scraped")
+async def get_scraped_data(match_id: int):
+    """Get scraped Footballia data for a match."""
+    db = MatchDB()
+    match = db.get_match(match_id)
+    db.close()
+    if not match:
+        return {"error": "Match not found"}
+    result = {}
+    for field in ["home_lineup_json", "away_lineup_json", "home_coach_json",
+                  "away_coach_json", "goals_json", "result_json"]:
+        val = match.get(field, "")
+        if val:
+            try:
+                result[field.replace("_json", "")] = json.loads(val)
+            except Exception:
+                pass
+    result["venue"] = match.get("venue", "")
+    result["stage"] = match.get("stage", "")
+    return result
 
 
 # ── Health check ──

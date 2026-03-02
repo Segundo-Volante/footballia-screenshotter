@@ -37,6 +37,9 @@ class Pipeline:
         capture_id: Optional[int] = None,
         provider: str = "openai",
         task_id: str = "camera_angle",
+        capture_mode: str = "full_match",
+        goal_times: list[dict] = None,
+        goal_window: int = 30,
     ):
         self.source = source
         self.match = match
@@ -47,6 +50,28 @@ class Pipeline:
         self.capture_id = capture_id
         self.provider = provider
         self.task_id = task_id
+        self.capture_mode = capture_mode
+        self.goal_times = goal_times or []
+        self.goal_window = goal_window
+
+        # Pre-compute goal capture ranges if in goals_only mode
+        self._goal_ranges: list[tuple[float, float]] = []
+        if capture_mode == "goals_only" and self.goal_times:
+            for g in self.goal_times:
+                minute = g.get("minute", 0)
+                center = minute * 60.0  # Convert to seconds
+                start = max(0, center - goal_window)
+                end = center + goal_window
+                self._goal_ranges.append((start, end))
+            # Sort and merge overlapping ranges
+            self._goal_ranges.sort()
+            merged = [self._goal_ranges[0]]
+            for start, end in self._goal_ranges[1:]:
+                if start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            self._goal_ranges = merged
 
         # Load task template
         tm = TaskManager()
@@ -146,11 +171,14 @@ class Pipeline:
 
             await self.broadcast({"type": "status", "status": "capturing", "message": "Capturing frames..."})
 
-            await asyncio.gather(
-                self._capture_loop(),
-                self._classify_loop(),
-                self._broadcast_loop(),
-            )
+            if self.capture_mode == "goals_only" and self._goal_ranges:
+                await self._run_goals_only()
+            else:
+                await asyncio.gather(
+                    self._capture_loop(),
+                    self._classify_loop(),
+                    self._broadcast_loop(),
+                )
 
         except Exception as e:
             logger.exception(f"Pipeline error: {e}")
@@ -393,6 +421,121 @@ class Pipeline:
             }
             await self.broadcast(progress)
             await asyncio.sleep(1)
+
+    async def _run_goals_only(self):
+        """
+        Capture frames only around goal times.
+        Seeks to each goal time window and captures with dense interval (1 second).
+        """
+        await self.broadcast({
+            "type": "status",
+            "status": "capturing",
+            "message": f"Goals Only mode: {len(self._goal_ranges)} time windows to capture",
+        })
+
+        for i, (range_start, range_end) in enumerate(self._goal_ranges):
+            if self.status != "capturing":
+                break
+
+            await self.broadcast({
+                "type": "status",
+                "status": "capturing",
+                "message": f"Seeking to goal window {i + 1}/{len(self._goal_ranges)} ({self._format_goal_time(range_start)})",
+            })
+
+            # Seek to start of this goal window
+            await self.source.seek_to(range_start)
+            await self.source.start_playback()
+
+            dense_interval = 1.0
+
+            while self.status == "capturing":
+                current_time = await self.source.get_current_time()
+                self._current_video_time = current_time
+
+                # Check if we've passed the end of this goal window
+                if current_time > range_end:
+                    break
+
+                # Check if video has ended
+                if await self.source.is_ended():
+                    has_next = await self.source.handle_next_part()
+                    if not has_next:
+                        break
+
+                # Handle pause
+                if self.status == "paused":
+                    await self._pause_event.wait()
+                    if self.status != "capturing":
+                        break
+
+                # Standard capture flow: capture -> pre-filter -> classify -> save
+                frame_bytes = await self.source.capture_frame()
+                if frame_bytes is None:
+                    await asyncio.sleep(dense_interval)
+                    continue
+
+                video_time = await self.source.get_current_time()
+
+                # Pre-filter (still applies — skip black frames and duplicates)
+                pf_result = self.pre_filter.analyze(frame_bytes)
+                if not pf_result["pass"]:
+                    await asyncio.sleep(dense_interval)
+                    continue
+
+                # Classify
+                classification = await self.classifier.classify_frame(frame_bytes)
+                classified_as = classification.get("classified_as", "OTHER")
+
+                # In Goals Only mode, save ALL passing frames regardless of target
+                filepath = await self.output.save_frame(frame_bytes, video_time, classification, self.source.current_part)
+                self.saved_counts[classified_as] = self.saved_counts.get(classified_as, 0) + 1
+
+                if self.capture_id:
+                    try:
+                        db = MatchDB()
+                        db.record_frame(
+                            capture_id=self.capture_id,
+                            filename=filepath.name,
+                            filepath=str(filepath),
+                            video_time=video_time,
+                            video_part=self.source.current_part,
+                            classification=classification,
+                        )
+                        db.close()
+                    except Exception:
+                        pass
+
+                thumbnail_b64 = self._make_thumbnail(frame_bytes)
+
+                # Broadcast progress
+                await self.broadcast({
+                    "type": "frame_classified",
+                    "filename": filepath.name,
+                    "classified_as": classified_as,
+                    "video_time": video_time,
+                    "confidence": classification.get("confidence", 0),
+                    "saved": True,
+                    "thumbnail_b64": thumbnail_b64,
+                    "goal_window": i + 1,
+                    "total_windows": len(self._goal_ranges),
+                    "counts": {
+                        cam: {
+                            "target": self.targets.get(cam, 0),
+                            "captured": self.saved_counts.get(cam, 0),
+                        }
+                        for cam in self.categories
+                    },
+                    "api_cost": self.classifier.get_cost(),
+                    "provider": self.provider,
+                })
+
+                await asyncio.sleep(dense_interval)
+
+    def _format_goal_time(self, seconds: float) -> str:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m:02d}:{s:02d}"
 
     def _make_thumbnail(self, jpeg_bytes: bytes) -> str:
         try:
