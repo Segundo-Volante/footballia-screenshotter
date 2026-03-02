@@ -11,6 +11,15 @@ defaults:
 
 sampling:
   interval_seconds: 2.0
+  min_interval: 1.0
+  max_interval: 6.0
+  adaptive: true
+
+pre_filter:
+  enabled: true
+  black_threshold: 15
+  duplicate_threshold: 0.03
+  scene_change_threshold: 0.35
 
 browser:
   headless: false
@@ -23,6 +32,10 @@ openai:
   detail: low
   max_concurrent: 3
   cost_per_frame: 0.00007
+
+gemini:
+  model: gemini-2.0-flash
+  free_tier: true
 
 output:
   base_dir: ./recordings

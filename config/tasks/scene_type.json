@@ -1,0 +1,63 @@
+{
+  "id": "scene_type",
+  "name": "Scene Type Classification",
+  "description": "Broad categorization of broadcast scene types",
+  "version": "1.0.0",
+  "classification_field": "scene",
+  "categories": [
+    "LIVE_ACTION",
+    "SET_PIECE",
+    "CELEBRATION",
+    "TACTICAL_VIEW",
+    "PLAYER_CLOSEUP",
+    "BENCH_CLOSEUP",
+    "REFEREE",
+    "CROWD",
+    "REPLAY",
+    "GRAPHICS",
+    "PRE_POST_MATCH"
+  ],
+  "category_descriptions": {
+    "LIVE_ACTION": "Active play — ball in motion, players running",
+    "SET_PIECE": "Dead ball: free kick, corner, throw-in, penalty",
+    "CELEBRATION": "Goal celebration or similar",
+    "TACTICAL_VIEW": "Wide overhead showing team shape and formations",
+    "PLAYER_CLOSEUP": "Tight shot of player face, reaction, or moment",
+    "BENCH_CLOSEUP": "Coach, bench staff, or substitutes on sideline",
+    "REFEREE": "Referee or assistant referee in focus",
+    "CROWD": "Fans, stadium atmosphere",
+    "REPLAY": "Slow-motion or instant replay of a previous moment",
+    "GRAPHICS": "Scoreboard, statistics overlay, pre-match lineups graphic",
+    "PRE_POST_MATCH": "Tunnel, warmup, post-match handshakes, studio"
+  },
+  "prompt": "Classify this football broadcast frame's scene type.\n\nCategories: LIVE_ACTION, SET_PIECE, CELEBRATION, TACTICAL_VIEW, PLAYER_CLOSEUP, BENCH_CLOSEUP, REFEREE, CROWD, REPLAY, GRAPHICS, PRE_POST_MATCH\n\nRespond with JSON only:\n{\"scene\": \"LIVE_ACTION\", \"confidence\": 0.9, \"reasoning\": \"ball in play, multiple players in motion\"}",
+  "extra_fields": ["reasoning"],
+  "suggested_targets": {
+    "LIVE_ACTION": 40, "SET_PIECE": 15, "CELEBRATION": 5,
+    "TACTICAL_VIEW": 20, "PLAYER_CLOSEUP": 10, "BENCH_CLOSEUP": 5,
+    "REFEREE": 3, "CROWD": 3, "REPLAY": 0, "GRAPHICS": 0,
+    "PRE_POST_MATCH": 0
+  },
+  "presets": {
+    "balanced": {
+      "name": "Balanced Coverage",
+      "description": "Representative sample of all scene types",
+      "targets": {
+        "LIVE_ACTION": 40, "SET_PIECE": 15, "CELEBRATION": 5,
+        "TACTICAL_VIEW": 20, "PLAYER_CLOSEUP": 10, "BENCH_CLOSEUP": 5,
+        "REFEREE": 3, "CROWD": 3, "REPLAY": 0, "GRAPHICS": 0,
+        "PRE_POST_MATCH": 0
+      }
+    },
+    "quick_test": {
+      "name": "Quick Test",
+      "description": "Small sample",
+      "targets": {
+        "LIVE_ACTION": 5, "SET_PIECE": 3, "CELEBRATION": 2,
+        "TACTICAL_VIEW": 3, "PLAYER_CLOSEUP": 2, "BENCH_CLOSEUP": 1,
+        "REFEREE": 1, "CROWD": 1, "REPLAY": 0, "GRAPHICS": 0,
+        "PRE_POST_MATCH": 0
+      }
+    }
+  }
+}

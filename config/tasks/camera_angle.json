@@ -1,0 +1,83 @@
+{
+  "id": "camera_angle",
+  "name": "Camera Angle Classification",
+  "description": "Classify broadcast camera angles for computer vision training data",
+  "version": "1.0.0",
+  "classification_field": "camera_type",
+  "categories": [
+    "WIDE_CENTER",
+    "WIDE_LEFT",
+    "WIDE_RIGHT",
+    "MEDIUM",
+    "CLOSEUP",
+    "BEHIND_GOAL",
+    "AERIAL",
+    "OTHER"
+  ],
+  "category_descriptions": {
+    "WIDE_CENTER": "Main broadcast camera, elevated center, full pitch width, 8+ players",
+    "WIDE_LEFT": "Broadcast camera panned to follow left side of pitch",
+    "WIDE_RIGHT": "Broadcast camera panned to follow right side of pitch",
+    "MEDIUM": "Tighter zone shot, 3-7 players visible, focused on ball area",
+    "CLOSEUP": "Tight on 1-2 people — face, celebration, injury, minimal pitch",
+    "BEHIND_GOAL": "Camera behind the goal line, goal posts often visible",
+    "AERIAL": "Spider cam or steep overhead — bird's eye formations view",
+    "OTHER": "Crowd, scoreboard, graphics, tunnel, replay transitions, studio"
+  },
+  "prompt": "Classify this football broadcast screenshot into ONE camera angle.\n\nCategories:\n- WIDE_CENTER: Main camera, central elevated position, 8+ players visible, full pitch width\n- WIDE_LEFT: Broadcast camera panned left, large pitch area visible\n- WIDE_RIGHT: Broadcast camera panned right, large pitch area visible\n- MEDIUM: Tighter shot, 3-7 players, focused on ball area\n- CLOSEUP: Tight on 1-2 people, face/celebration/injury, minimal pitch visible\n- BEHIND_GOAL: Camera behind goal line looking down the pitch, goal posts often visible\n- AERIAL: Top-down or steep overhead, spider cam, bird's eye view of formations\n- OTHER: Crowd, scoreboard, graphics, tunnel, replay transition, studio\n\nThink step by step:\n1. How many players are visible?\n2. How much of the pitch is shown (estimate percentage)?\n3. What is the camera height and angle?\n4. Are there any non-game elements (graphics, replays, studio)?\n\nRespond with JSON only:\n{\"camera_type\": \"WIDE_CENTER\", \"confidence\": 0.95, \"reasoning\": \"brief explanation\", \"players_visible\": 18, \"pitch_visible_pct\": 80, \"is_replay\": false}",
+  "extra_fields": ["players_visible", "pitch_visible_pct", "is_replay", "reasoning"],
+  "suggested_targets": {
+    "WIDE_CENTER": 50,
+    "WIDE_LEFT": 20,
+    "WIDE_RIGHT": 20,
+    "MEDIUM": 20,
+    "CLOSEUP": 10,
+    "BEHIND_GOAL": 5,
+    "AERIAL": 5,
+    "OTHER": 0
+  },
+  "presets": {
+    "training_data": {
+      "name": "Training Data (RT-DETR / YOLO)",
+      "description": "Balanced dataset for object detection model training",
+      "targets": {
+        "WIDE_CENTER": 60,
+        "WIDE_LEFT": 15,
+        "WIDE_RIGHT": 15,
+        "MEDIUM": 20,
+        "CLOSEUP": 5,
+        "BEHIND_GOAL": 5,
+        "AERIAL": 5,
+        "OTHER": 0
+      }
+    },
+    "tactical_analysis": {
+      "name": "Tactical Analysis",
+      "description": "Maximize wide shots for formation study",
+      "targets": {
+        "WIDE_CENTER": 80,
+        "WIDE_LEFT": 30,
+        "WIDE_RIGHT": 30,
+        "MEDIUM": 10,
+        "CLOSEUP": 0,
+        "BEHIND_GOAL": 0,
+        "AERIAL": 10,
+        "OTHER": 0
+      }
+    },
+    "quick_test": {
+      "name": "Quick Test",
+      "description": "Small sample to verify setup is working",
+      "targets": {
+        "WIDE_CENTER": 5,
+        "WIDE_LEFT": 3,
+        "WIDE_RIGHT": 3,
+        "MEDIUM": 3,
+        "CLOSEUP": 2,
+        "BEHIND_GOAL": 2,
+        "AERIAL": 2,
+        "OTHER": 0
+      }
+    }
+  }
+}

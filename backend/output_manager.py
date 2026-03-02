@@ -3,12 +3,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from backend.utils import logger, CAMERA_TYPES
+from backend.utils import logger
 
 
 class OutputManager:
-    def __init__(self, match: dict, base_dir: str):
+    def __init__(self, match: dict, base_dir: str, categories: list[str] | None = None):
         self.match = match
+        self.categories = categories or []
         md = int(match.get("md", 0))
         opponent = match.get("opponent", "Unknown").replace(" ", "_")
         date = match.get("date", "unknown")
@@ -20,8 +21,10 @@ class OutputManager:
 
     def _ensure_dirs(self):
         self.base_path.mkdir(parents=True, exist_ok=True)
-        for cam_type in CAMERA_TYPES:
-            (self.base_path / cam_type).mkdir(exist_ok=True)
+        for cat in self.categories:
+            (self.base_path / cat).mkdir(exist_ok=True)
+        # Always create PENDING for manual mode
+        (self.base_path / "PENDING").mkdir(exist_ok=True)
         logger.info(f"Output directory: {self.base_path}")
 
     def _load_existing_metadata(self):
@@ -34,9 +37,9 @@ class OutputManager:
             logger.info(f"Loaded {len(self.results)} existing frames from metadata.csv")
 
     def get_existing_counts(self) -> dict:
-        counts = {cam: 0 for cam in CAMERA_TYPES}
+        counts = {cat: 0 for cat in self.categories}
         for r in self.results:
-            cam = r.get("camera_type", "OTHER")
+            cam = r.get("classified_as") or r.get("camera_type", "OTHER")
             if cam in counts:
                 counts[cam] += 1
         return counts
@@ -48,27 +51,38 @@ class OutputManager:
         classification: dict,
         video_part: int,
     ) -> Path:
-        cam_type = classification["camera_type"]
-        confidence = int(classification["confidence"] * 100)
+        classified_as = classification.get("classified_as") or classification.get("camera_type", "OTHER")
+        confidence = int(classification.get("confidence", 0) * 100)
         time_str = f"{video_time:08.2f}"
 
-        filename = f"frame_{time_str}_{cam_type.lower()}_conf{confidence}.jpg"
-        filepath = self.base_path / cam_type / filename
+        filename = f"frame_{time_str}_{classified_as.lower()}_conf{confidence}.jpg"
+
+        # Ensure category dir exists
+        cat_dir = self.base_path / classified_as
+        cat_dir.mkdir(parents=True, exist_ok=True)
+        filepath = cat_dir / filename
 
         filepath.write_bytes(jpeg_bytes)
 
         self.results.append({
             "filename": filename,
-            "camera_type": cam_type,
-            "confidence": classification["confidence"],
+            "classified_as": classified_as,
+            "confidence": classification.get("confidence", 0),
             "video_time": video_time,
             "video_part": video_part,
-            "players_visible": classification.get("players_visible", 0),
-            "pitch_visible_pct": classification.get("pitch_visible_pct", 0),
-            "is_replay": classification.get("is_replay", False),
+            "reasoning": classification.get("reasoning", ""),
             "timestamp": datetime.now().isoformat(),
         })
 
+        return filepath
+
+    def save_frame_to_pending(self, jpeg_bytes: bytes, video_time: float) -> Path:
+        """Save a frame to PENDING/ for manual classification later."""
+        pending_dir = self.base_path / "PENDING"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"frame_{video_time:08.2f}.jpg"
+        filepath = pending_dir / filename
+        filepath.write_bytes(jpeg_bytes)
         return filepath
 
     def generate_metadata_csv(self):
@@ -77,9 +91,8 @@ class OutputManager:
             return
 
         fieldnames = [
-            "filename", "camera_type", "confidence", "video_time",
-            "video_part", "players_visible", "pitch_visible_pct",
-            "is_replay", "timestamp",
+            "filename", "classified_as", "confidence", "video_time",
+            "video_part", "reasoning", "timestamp",
         ]
 
         with open(csv_path, "w", newline="") as f:
@@ -91,9 +104,9 @@ class OutputManager:
         logger.info(f"Wrote metadata.csv with {len(self.results)} entries")
 
     def generate_summary_json(self, classifier, duration_seconds: float):
-        counts = {cam: 0 for cam in CAMERA_TYPES}
+        counts = {cat: 0 for cat in self.categories}
         for r in self.results:
-            cam = r.get("camera_type", "OTHER")
+            cam = r.get("classified_as") or r.get("camera_type", "OTHER")
             if cam in counts:
                 counts[cam] += 1
 
@@ -109,7 +122,8 @@ class OutputManager:
                 "counts": counts,
                 "duration_seconds": round(duration_seconds, 1),
                 "api_cost": round(classifier.get_cost(), 6),
-                "total_tokens": classifier.total_tokens,
+                "api_calls": classifier.get_call_count(),
+                "provider": classifier.get_provider_name(),
             },
             "output_dir": str(self.base_path),
             "generated_at": datetime.now().isoformat(),
@@ -122,7 +136,6 @@ class OutputManager:
         logger.info(f"Wrote summary.json")
 
     def get_output_dir(self) -> str:
-        """Return the output directory path as string."""
         return str(self.base_path)
 
     @property

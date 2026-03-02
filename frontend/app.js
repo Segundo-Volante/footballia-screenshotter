@@ -17,11 +17,16 @@ const state = {
     costPerFrame: 0.00007,
     quickCaptureMode: false,
     editingUrlMatchId: null,
+    // Part 2 additions
+    tasks: [],
+    providers: [],
+    selectedTask: null,
+    selectedProvider: 'openai',
+    selectedPreset: null,
 };
 
 // ===== VIEW SWITCHING =====
 function showView(viewName) {
-    // Hide all modals when switching views
     document.querySelectorAll('.modal').forEach(m => m.style.display = 'none');
 
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -40,12 +45,15 @@ function showView(viewName) {
     if (viewName === 'home') {
         updateHomeView();
     }
+
+    if (viewName === 'config') {
+        loadConfigView();
+    }
 }
 
 // ===== INITIALIZATION =====
 async function init() {
     try {
-        // Check if project is set up
         const projectRes = await fetch('/api/project').then(r => r.json());
 
         if (projectRes.needs_setup) {
@@ -55,13 +63,11 @@ async function init() {
 
         state.project = projectRes.project;
 
-        // Load config
         const configRes = await fetch('/api/config').then(r => r.json());
         state.cameraTypes = configRes.camera_types || [];
         state.cameraDescriptions = configRes.camera_descriptions || {};
         state.defaultTargets = configRes.defaults?.targets || {};
 
-        // Check if a capture is in progress
         const statusRes = await fetch('/api/capture/status').then(r => r.json());
         if (statusRes.status === 'capturing' || statusRes.status === 'paused') {
             showView('dashboard');
@@ -81,7 +87,6 @@ function updateHomeView() {
         const sub = `${state.project.team_name} · ${state.project.season}`;
         document.getElementById('home-subtitle').textContent = sub;
     }
-    // Update match count
     fetch('/api/matches').then(r => r.json()).then(matches => {
         state.matches = matches;
         const countEl = document.getElementById('home-match-count');
@@ -110,7 +115,6 @@ async function completeSetup() {
             body: JSON.stringify({team_name: teamName, season, competitions}),
         });
 
-        // Import Excel if provided
         if (excelPath) {
             try {
                 const importRes = await fetch('/api/matches/import-excel', {
@@ -127,7 +131,6 @@ async function completeSetup() {
             }
         }
 
-        // Reload config
         const configRes = await fetch('/api/config').then(r => r.json());
         state.cameraTypes = configRes.camera_types || [];
         state.cameraDescriptions = configRes.camera_descriptions || {};
@@ -163,7 +166,6 @@ function renderMatchTable(matches) {
         if (hasUrl) {
             tr.className = 'clickable';
             tr.onclick = (e) => {
-                // Don't navigate if clicking the URL cell
                 if (e.target.closest('.url-cell')) return;
                 selectMatch(m);
             };
@@ -208,7 +210,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Radio buttons for start position
     document.querySelectorAll('input[name="start-pos"]').forEach(radio => {
         radio.addEventListener('change', () => {
             const timeInput = document.getElementById('start-time-input');
@@ -245,7 +246,6 @@ async function startQuickCapture() {
     const opponent = document.getElementById('quick-opponent').value.trim() || 'Unknown';
     const date = document.getElementById('quick-date').value.trim() || '';
 
-    // Use default targets
     const targets = {};
     state.cameraTypes.forEach(type => {
         targets[type] = state.defaultTargets[type] || 0;
@@ -265,14 +265,10 @@ async function startQuickCapture() {
 
     hideQuickCapture();
 
-    // Go to config view for review/adjustment
-    const ha = '';
-    document.getElementById('config-match-title').textContent = `Quick Capture · ${opponent}`;
+    document.getElementById('config-match-title').textContent = `Quick Capture \u00b7 ${opponent}`;
     document.getElementById('config-match-date').textContent = date || 'Footballia URL';
     document.getElementById('config-back-btn').onclick = () => showView('home');
 
-    renderTargetInputs();
-    updateSummary();
     showView('config');
 }
 
@@ -282,7 +278,7 @@ function showUrlEdit(matchId, currentUrl) {
     document.getElementById('url-edit-input').value = currentUrl || '';
     const match = state.matches.find(m => m.id === matchId);
     document.getElementById('url-edit-title').textContent =
-        match ? `Edit URL · ${match.opponent}` : 'Edit Footballia URL';
+        match ? `Edit URL \u00b7 ${match.opponent}` : 'Edit Footballia URL';
     document.getElementById('url-edit-modal').style.display = 'flex';
     document.getElementById('url-edit-input').focus();
 }
@@ -418,18 +414,179 @@ function selectMatch(match) {
     state.selectedMatch = match;
     state.quickCaptureMode = false;
 
-    const teamName = state.project?.team_name || 'Team';
     const ha = match.home_away === 'H' ? '(H)' : match.home_away === 'A' ? '(A)' : '';
     const md = match.md || match.match_day || '';
-    const mdStr = md ? `MD${md} · ` : '';
+    const mdStr = md ? `MD${md} \u00b7 ` : '';
     document.getElementById('config-match-title').textContent =
-        `${mdStr}${match.opponent} ${ha} · ${match.score || ''}`;
+        `${mdStr}${match.opponent} ${ha} \u00b7 ${match.score || ''}`;
     document.getElementById('config-match-date').textContent = match.date || '';
     document.getElementById('config-back-btn').onclick = () => showView('library');
 
-    renderTargetInputs();
-    updateSummary();
     showView('config');
+}
+
+async function loadConfigView() {
+    // Load tasks and providers in parallel
+    try {
+        const [tasksRes, providersRes] = await Promise.all([
+            fetch('/api/tasks').then(r => r.json()),
+            fetch('/api/providers').then(r => r.json()),
+        ]);
+        state.tasks = tasksRes;
+        state.providers = providersRes;
+
+        // Default selections
+        if (!state.selectedTask && state.tasks.length > 0) {
+            state.selectedTask = state.tasks[0].id;
+        }
+
+        renderTaskCards();
+        renderProviderCards();
+        await loadTaskDetails();
+    } catch (e) {
+        console.error('Config load error:', e);
+        // Fallback to existing behavior
+        renderTargetInputs();
+        updateSummary();
+    }
+}
+
+function renderTaskCards() {
+    const container = document.getElementById('task-cards');
+    container.innerHTML = '';
+
+    state.tasks.forEach(task => {
+        const card = document.createElement('div');
+        card.className = `task-card${task.id === state.selectedTask ? ' selected' : ''}`;
+        card.onclick = () => selectTask(task.id);
+
+        const catCount = task.category_count || 0;
+        card.innerHTML = `
+            <div class="task-card-name">${task.name}</div>
+            <div class="task-card-meta">${catCount} categories</div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+async function selectTask(taskId) {
+    state.selectedTask = taskId;
+    state.selectedPreset = null;
+    renderTaskCards();
+    await loadTaskDetails();
+}
+
+async function loadTaskDetails() {
+    if (!state.selectedTask) return;
+
+    try {
+        const task = await fetch(`/api/tasks/${state.selectedTask}`).then(r => r.json());
+
+        // Update categories from task
+        state.cameraTypes = (task.categories || []).map(c => c.value);
+        state.cameraDescriptions = {};
+        (task.categories || []).forEach(c => {
+            state.cameraDescriptions[c.value] = c.label || c.value;
+        });
+
+        // Set suggested targets as defaults
+        state.defaultTargets = task.suggested_targets || {};
+
+        // Render presets
+        renderPresetBar(task.presets || []);
+        renderTargetInputs();
+        updateSummary();
+    } catch (e) {
+        console.error('Load task error:', e);
+    }
+}
+
+function renderPresetBar(presets) {
+    const bar = document.getElementById('preset-bar');
+    bar.innerHTML = '';
+
+    presets.forEach(preset => {
+        const btn = document.createElement('button');
+        btn.className = `preset-btn${preset.id === state.selectedPreset ? ' selected' : ''}`;
+        btn.textContent = preset.name;
+        btn.onclick = () => selectPreset(preset);
+        bar.appendChild(btn);
+    });
+
+    // Custom option
+    const customBtn = document.createElement('button');
+    customBtn.className = `preset-btn${state.selectedPreset === null ? ' selected' : ''}`;
+    customBtn.textContent = 'Custom';
+    customBtn.onclick = () => {
+        state.selectedPreset = null;
+        renderPresetBar(presets);
+    };
+    bar.appendChild(customBtn);
+}
+
+async function selectPreset(preset) {
+    state.selectedPreset = preset.id;
+
+    try {
+        const res = await fetch(`/api/tasks/${state.selectedTask}/presets/${preset.id}`).then(r => r.json());
+        if (res.targets) {
+            state.targets = {};
+            state.cameraTypes.forEach(type => {
+                state.targets[type] = res.targets[type] || 0;
+            });
+
+            // Update input fields
+            state.cameraTypes.forEach(type => {
+                const input = document.querySelector(`.target-input[data-type="${type}"]`);
+                if (input) input.value = state.targets[type] || 0;
+            });
+
+            updateSummary();
+        }
+    } catch (e) {
+        console.error('Preset load error:', e);
+    }
+
+    // Re-render preset bar to update selection
+    const taskRes = await fetch(`/api/tasks/${state.selectedTask}`).then(r => r.json());
+    renderPresetBar(taskRes.presets || []);
+}
+
+function renderProviderCards() {
+    const container = document.getElementById('provider-cards');
+    container.innerHTML = '';
+
+    state.providers.forEach(provider => {
+        const card = document.createElement('div');
+        const isSelected = provider.id === state.selectedProvider;
+        const isAvailable = provider.available;
+        card.className = `provider-card${isSelected ? ' selected' : ''}${!isAvailable ? ' unavailable' : ''}`;
+        card.onclick = () => {
+            if (isAvailable) selectProvider(provider.id);
+        };
+
+        const costStr = provider.cost_per_frame > 0
+            ? `$${(provider.cost_per_frame * 1000).toFixed(2)}/1K frames`
+            : 'Free';
+        const statusStr = isAvailable ? costStr : 'No API key';
+
+        card.innerHTML = `
+            <div class="provider-card-name">${provider.name}</div>
+            <div class="provider-card-desc">${provider.description}</div>
+            <div class="provider-card-cost">${statusStr}</div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+function selectProvider(providerId) {
+    state.selectedProvider = providerId;
+    const provider = state.providers.find(p => p.id === providerId);
+    if (provider) {
+        state.costPerFrame = provider.cost_per_frame || 0;
+    }
+    renderProviderCards();
+    updateSummary();
 }
 
 function renderTargetInputs() {
@@ -437,7 +594,7 @@ function renderTargetInputs() {
     container.innerHTML = '';
 
     state.cameraTypes.forEach(type => {
-        const defaultVal = state.defaultTargets[type] || 0;
+        const defaultVal = state.targets[type] !== undefined ? state.targets[type] : (state.defaultTargets[type] || 0);
         state.targets[type] = defaultVal;
 
         const desc = state.cameraDescriptions[type] || '';
@@ -446,8 +603,8 @@ function renderTargetInputs() {
         row.className = 'target-row';
         row.innerHTML = `
             <div class="target-info">
-                <span class="target-label">${formatCameraLabel(type)}</span>
-                <span class="target-desc">${desc}</span>
+                <span class="target-name">${formatCategoryLabel(type)}</span>
+                <span class="target-hint">${desc}</span>
             </div>
             <input type="number" class="target-input" data-type="${type}"
                    value="${defaultVal}" min="0" max="500" />
@@ -455,7 +612,6 @@ function renderTargetInputs() {
         container.appendChild(row);
     });
 
-    // Bind input events
     container.querySelectorAll('.target-input').forEach(input => {
         input.addEventListener('input', () => {
             state.targets[input.dataset.type] = parseInt(input.value) || 0;
@@ -464,10 +620,9 @@ function renderTargetInputs() {
     });
 }
 
-function formatCameraLabel(type) {
+function formatCategoryLabel(type) {
     return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-               .replace('Closeup', 'Close-up')
-               .replace('Behind Goal', 'Behind Goal');
+               .replace('Closeup', 'Close-up');
 }
 
 function updateSummary() {
@@ -475,7 +630,8 @@ function updateSummary() {
     const cost = total * state.costPerFrame;
 
     document.getElementById('total-count').textContent = total;
-    document.getElementById('est-cost').textContent = `$${cost.toFixed(3)}`;
+    document.getElementById('est-cost').textContent = state.costPerFrame > 0 ? `$${cost.toFixed(3)}` : 'Free';
+    document.getElementById('summary-provider').textContent = state.selectedProvider;
 }
 
 // ===== START CAPTURE =====
@@ -497,6 +653,8 @@ async function startCapture() {
         start_time: startTime,
         match_data: match,
         source_type: 'footballia',
+        provider: state.selectedProvider,
+        task_id: state.selectedTask || 'camera_angle',
     };
 
     try {
@@ -523,14 +681,14 @@ async function startCapture() {
 function setupDashboard(match) {
     const ha = match.home_away === 'H' ? '(H)' : match.home_away === 'A' ? '(A)' : '';
     const md = match.md || match.match_day || '';
-    const mdStr = md ? `MD${md} · ` : '';
-    const title = `${mdStr}${match.opponent || 'Quick Capture'} ${ha} · ${match.score || ''}`;
+    const mdStr = md ? `MD${md} \u00b7 ` : '';
+    const title = `${mdStr}${match.opponent || 'Quick Capture'} ${ha} \u00b7 ${match.score || ''}`;
 
     document.getElementById('dash-match-title').textContent = title;
+    document.getElementById('dash-provider').textContent = state.selectedProvider;
     document.getElementById('completed-match-title').textContent =
-        `${title} · ${match.date || ''}`;
+        `${title} \u00b7 ${match.date || ''}`;
 
-    // Setup progress table
     const tbody = document.getElementById('progress-tbody');
     tbody.innerHTML = '';
 
@@ -541,7 +699,7 @@ function setupDashboard(match) {
         const tr = document.createElement('tr');
         tr.id = `prog-row-${type}`;
         tr.innerHTML = `
-            <td>${formatCameraLabel(type)}</td>
+            <td>${formatCategoryLabel(type)}</td>
             <td class="col-num">${target}</td>
             <td class="col-num" data-count="${type}">0</td>
             <td class="col-bar">
@@ -562,6 +720,13 @@ function setupDashboard(match) {
     document.getElementById('dashboard-capturing').style.display = 'block';
     document.getElementById('dashboard-completed').style.display = 'none';
     document.getElementById('pause-overlay').classList.remove('active');
+
+    // Reset filter stats
+    document.getElementById('fs-total').textContent = '0';
+    document.getElementById('fs-passed').textContent = '0';
+    document.getElementById('fs-black').textContent = '0';
+    document.getElementById('fs-dup').textContent = '0';
+    document.getElementById('fs-scene').textContent = '0';
 }
 
 // ===== WEBSOCKET =====
@@ -583,6 +748,9 @@ function connectWebSocket() {
                 break;
             case 'frame_skipped':
                 addToActivityLog({...msg, skipped: true});
+                break;
+            case 'frame_filtered':
+                // Silently count — stats shown in filter-stats bar
                 break;
             case 'status':
                 handleStatusChange(msg);
@@ -611,7 +779,6 @@ function sendAction(action) {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
         state.ws.send(JSON.stringify({action}));
     } else {
-        // Fallback to REST
         fetch(`/api/capture/${action}`, {method: 'POST'});
     }
 }
@@ -623,7 +790,20 @@ function updateProgressUI(msg) {
     document.getElementById('video-part').textContent =
         `Part ${msg.video_part} of ${msg.total_parts}`;
 
-    // Update each camera type row
+    if (msg.provider) {
+        document.getElementById('dash-provider').textContent = msg.provider;
+    }
+
+    // Update pre-filter stats
+    if (msg.pre_filter_stats) {
+        const pf = msg.pre_filter_stats;
+        document.getElementById('fs-total').textContent = pf.total || 0;
+        document.getElementById('fs-passed').textContent = pf.passed || 0;
+        document.getElementById('fs-black').textContent = pf.black || 0;
+        document.getElementById('fs-dup').textContent = pf.duplicate || 0;
+        document.getElementById('fs-scene').textContent = pf.scene_changes || 0;
+    }
+
     if (msg.counts) {
         for (const [type, data] of Object.entries(msg.counts)) {
             const pct = data.target > 0 ? Math.min(100, (data.captured / data.target) * 100) : 0;
@@ -642,13 +822,11 @@ function updateProgressUI(msg) {
         }
     }
 
-    // Update totals
     document.getElementById('total-progress').textContent =
         `${msg.total_captured} / ${msg.total_target}`;
     document.getElementById('api-cost').textContent =
         `$${(msg.api_cost || 0).toFixed(4)}`;
 
-    // Overall bar
     const overallPct = msg.total_target > 0
         ? Math.min(100, (msg.total_captured / msg.total_target) * 100) : 0;
     document.getElementById('overall-bar').style.width = `${overallPct}%`;
@@ -668,24 +846,27 @@ function renderActivityLog() {
     state.activityLog.forEach(entry => {
         const div = document.createElement('div');
         div.className = 'log-entry';
+        if (entry.anomaly) div.className += ' log-anomaly';
 
         const now = new Date();
         const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
         const videoTimeStr = formatTime(entry.video_time || 0);
+        const classifiedAs = entry.classified_as || entry.camera_type || '';
 
         if (entry.skipped) {
             div.innerHTML = `
                 <span class="log-time">${timeStr}</span>
                 <span class="log-file">${videoTimeStr}</span>
-                <span class="log-type">${entry.camera_type || ''}</span>
+                <span class="log-type">${classifiedAs}</span>
                 <span class="log-skip">\u2192skip</span>
             `;
         } else {
             const conf = entry.confidence ? `${Math.round(entry.confidence * 100)}%` : '';
+            const anomalyTag = entry.anomaly ? `<span class="log-anomaly-tag">!</span>` : '';
             div.innerHTML = `
                 <span class="log-time">${timeStr}</span>
                 <span class="log-file">${entry.filename || videoTimeStr}</span>
-                <span class="log-type">${entry.camera_type || ''}</span>
+                <span class="log-type">${classifiedAs}${anomalyTag}</span>
                 <span class="log-conf">conf: ${conf}</span>
             `;
         }
@@ -700,8 +881,10 @@ function updateLatestFrame(msg) {
         const img = document.getElementById('latest-thumbnail');
         img.src = `data:image/jpeg;base64,${msg.thumbnail_b64}`;
 
+        const classifiedAs = msg.classified_as || msg.camera_type || '';
+        const confText = msg.confidence ? `${Math.round(msg.confidence * 100)}%` : '';
         document.getElementById('latest-info').textContent =
-            `${formatTime(msg.video_time)} \u00b7 ${msg.camera_type} \u00b7 ${Math.round(msg.confidence * 100)}% confidence`;
+            `${formatTime(msg.video_time)} \u00b7 ${classifiedAs} \u00b7 ${confText} confidence`;
     }
 }
 
@@ -743,7 +926,6 @@ function showCompletionSummary(summary) {
     document.getElementById('pause-overlay').classList.remove('active');
     document.getElementById('dashboard-completed').style.display = 'block';
 
-    // Fill completed table
     const tbody = document.getElementById('completed-tbody');
     tbody.innerHTML = '';
 
@@ -771,7 +953,7 @@ function showCompletionSummary(summary) {
             }
 
             tr.innerHTML = `
-                <td>${formatCameraLabel(type)}</td>
+                <td>${formatCategoryLabel(type)}</td>
                 <td class="col-num">${data.target}</td>
                 <td class="col-num">${data.captured}</td>
                 <td class="${statusClass}">${statusText}</td>
@@ -780,7 +962,6 @@ function showCompletionSummary(summary) {
         }
     }
 
-    // Totals row
     const totalTr = document.createElement('tr');
     totalTr.style.fontWeight = '600';
     totalTr.innerHTML = `
@@ -795,13 +976,15 @@ function showCompletionSummary(summary) {
         `${summary.duration_minutes || 0}m`;
     document.getElementById('completed-cost').textContent =
         `$${(summary.api_cost || 0).toFixed(4)}`;
+    document.getElementById('completed-provider').textContent =
+        summary.provider || '';
     document.getElementById('completed-output-dir').textContent =
         summary.output_dir || '';
 }
 
 function showError(message) {
     addToActivityLog({
-        camera_type: 'ERROR',
+        classified_as: 'ERROR',
         video_time: 0,
         filename: message,
         skipped: false,

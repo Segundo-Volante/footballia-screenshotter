@@ -1,0 +1,76 @@
+{
+  "id": "match_event",
+  "name": "Match Event Detection",
+  "description": "Classify what is happening in each broadcast frame",
+  "version": "1.0.0",
+  "classification_field": "event",
+  "categories": [
+    "OPEN_PLAY",
+    "GOAL_CELEBRATION",
+    "FREE_KICK",
+    "CORNER",
+    "PENALTY",
+    "THROW_IN",
+    "GOAL_KICK",
+    "SUBSTITUTION",
+    "INJURY",
+    "CARD_SHOWN",
+    "KICKOFF",
+    "REPLAY",
+    "NON_GAME"
+  ],
+  "category_descriptions": {
+    "OPEN_PLAY": "Normal active play in progress",
+    "GOAL_CELEBRATION": "Players celebrating a goal",
+    "FREE_KICK": "Free kick being set up or taken",
+    "CORNER": "Corner kick being taken",
+    "PENALTY": "Penalty kick situation",
+    "THROW_IN": "Throw-in being taken",
+    "GOAL_KICK": "Goal kick being taken",
+    "SUBSTITUTION": "Player substitution in progress",
+    "INJURY": "Injury stoppage, medical staff on pitch",
+    "CARD_SHOWN": "Referee showing yellow or red card",
+    "KICKOFF": "Kickoff at start of half",
+    "REPLAY": "Replay of a previous moment",
+    "NON_GAME": "Studio, crowd, scoreboard, graphics, halftime"
+  },
+  "prompt": "Classify what is happening in this football broadcast frame.\n\nCategories: OPEN_PLAY, GOAL_CELEBRATION, FREE_KICK, CORNER, PENALTY, THROW_IN, GOAL_KICK, SUBSTITUTION, INJURY, CARD_SHOWN, KICKOFF, REPLAY, NON_GAME\n\nThink step by step:\n1. Is this live action or a replay/graphic?\n2. Is play active or stopped?\n3. If stopped, what set piece or event is occurring?\n\nRespond with JSON only:\n{\"event\": \"CORNER\", \"confidence\": 0.9, \"reasoning\": \"corner flag visible, player positioned to kick\"}",
+  "extra_fields": ["reasoning"],
+  "suggested_targets": {
+    "OPEN_PLAY": 40,
+    "GOAL_CELEBRATION": 5,
+    "FREE_KICK": 10,
+    "CORNER": 10,
+    "PENALTY": 3,
+    "THROW_IN": 5,
+    "GOAL_KICK": 5,
+    "SUBSTITUTION": 3,
+    "INJURY": 2,
+    "CARD_SHOWN": 3,
+    "KICKOFF": 2,
+    "REPLAY": 0,
+    "NON_GAME": 0
+  },
+  "presets": {
+    "set_pieces": {
+      "name": "Set Piece Focus",
+      "description": "Prioritize dead ball situations for set piece analysis",
+      "targets": {
+        "OPEN_PLAY": 10, "GOAL_CELEBRATION": 3, "FREE_KICK": 20,
+        "CORNER": 20, "PENALTY": 5, "THROW_IN": 10, "GOAL_KICK": 10,
+        "SUBSTITUTION": 0, "INJURY": 0, "CARD_SHOWN": 0,
+        "KICKOFF": 0, "REPLAY": 0, "NON_GAME": 0
+      }
+    },
+    "quick_test": {
+      "name": "Quick Test",
+      "description": "Small sample",
+      "targets": {
+        "OPEN_PLAY": 5, "GOAL_CELEBRATION": 2, "FREE_KICK": 3,
+        "CORNER": 3, "PENALTY": 1, "THROW_IN": 2, "GOAL_KICK": 2,
+        "SUBSTITUTION": 1, "INJURY": 1, "CARD_SHOWN": 1,
+        "KICKOFF": 1, "REPLAY": 0, "NON_GAME": 0
+      }
+    }
+  }
+}

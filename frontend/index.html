@@ -171,9 +171,34 @@
                 <h2 id="config-match-title"></h2>
                 <p class="match-date" id="config-match-date"></p>
             </div>
+
+            <!-- Task selector -->
+            <div class="section">
+                <h3>Classification Task</h3>
+                <p class="section-desc">What should the AI classify in each frame?</p>
+                <div class="task-cards" id="task-cards"></div>
+            </div>
+            <div class="divider"></div>
+
+            <!-- Provider selector -->
+            <div class="section">
+                <h3>AI Provider</h3>
+                <p class="section-desc">Choose which AI service classifies your frames.</p>
+                <div class="provider-cards" id="provider-cards"></div>
+            </div>
+            <div class="divider"></div>
+
+            <!-- Preset bar -->
+            <div class="section">
+                <h3>Capture Preset</h3>
+                <p class="section-desc">Quick-fill targets from a preset, or customize below.</p>
+                <div class="preset-bar" id="preset-bar"></div>
+            </div>
+            <div class="divider"></div>
+
             <div class="section">
                 <h3>Screenshot Targets</h3>
-                <p class="section-desc">Set how many screenshots you need for each camera angle.</p>
+                <p class="section-desc">Set how many screenshots you need for each category.</p>
                 <div class="target-grid" id="target-inputs"></div>
             </div>
             <div class="divider"></div>
@@ -188,7 +213,8 @@
             <div class="divider"></div>
             <div class="summary-bar">
                 Total: <span class="mono" id="total-count">0</span> screenshots &middot;
-                Est. cost: <span class="mono" id="est-cost">$0.000</span>
+                Est. cost: <span class="mono" id="est-cost">$0.000</span> &middot;
+                Provider: <span class="mono" id="summary-provider">openai</span>
             </div>
             <button class="btn-primary" onclick="startCapture()">&#9654; Start Capture</button>
         </div>
@@ -198,14 +224,24 @@
             <div id="dashboard-capturing">
                 <div class="dash-header">
                     <h2 id="dash-match-title"></h2>
-                    <p class="dash-meta">Video: <span class="mono" id="video-time">00:00</span> / <span class="mono" id="video-duration">00:00</span> &middot; <span id="video-part">Part 1 of 1</span></p>
+                    <p class="dash-meta">Video: <span class="mono" id="video-time">00:00</span> / <span class="mono" id="video-duration">00:00</span> &middot; <span id="video-part">Part 1 of 1</span> &middot; Provider: <span class="mono" id="dash-provider">openai</span></p>
                 </div>
+
+                <!-- Pre-filter stats -->
+                <div class="filter-stats" id="filter-stats">
+                    <span class="filter-stat">Frames: <span class="mono" id="fs-total">0</span></span>
+                    <span class="filter-stat">Passed: <span class="mono" id="fs-passed">0</span></span>
+                    <span class="filter-stat">Black: <span class="mono" id="fs-black">0</span></span>
+                    <span class="filter-stat">Duplicate: <span class="mono" id="fs-dup">0</span></span>
+                    <span class="filter-stat">Scene cuts: <span class="mono" id="fs-scene">0</span></span>
+                </div>
+
                 <div class="overall-progress">
                     <div class="progress-bar-container large"><div class="progress-bar-fill" id="overall-bar"></div></div>
                     <span class="mono overall-pct" id="overall-pct">0%</span>
                 </div>
                 <table class="progress-table">
-                    <thead><tr><th>Camera Angle</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Progress</th></tr></thead>
+                    <thead><tr><th>Category</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Progress</th></tr></thead>
                     <tbody id="progress-tbody"></tbody>
                 </table>
                 <div class="dash-totals">Total: <span class="mono" id="total-progress">0 / 0</span> captured &middot; <span class="mono" id="api-cost">$0.0000</span> spent</div>
@@ -246,11 +282,11 @@
                 <div class="completed-header"><span class="completed-icon">&#9989;</span><h2>Capture Complete</h2></div>
                 <p class="completed-match" id="completed-match-title"></p>
                 <table class="progress-table">
-                    <thead><tr><th>Camera Angle</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Category</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Status</th></tr></thead>
                     <tbody id="completed-tbody"></tbody>
                 </table>
                 <div class="completed-stats">
-                    <p>Duration: <span class="mono" id="completed-duration"></span> &middot; API cost: <span class="mono" id="completed-cost"></span></p>
+                    <p>Duration: <span class="mono" id="completed-duration"></span> &middot; API cost: <span class="mono" id="completed-cost"></span> &middot; Provider: <span class="mono" id="completed-provider"></span></p>
                     <p>Output: <span class="mono" id="completed-output-dir"></span></p>
                 </div>
                 <div class="completed-actions"><button class="btn-secondary" onclick="showView('home')">&#8592; Home</button></div>

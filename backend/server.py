@@ -8,7 +8,8 @@ from pydantic import BaseModel
 from backend.match_db import MatchDB
 from backend.pipeline import Pipeline
 from backend.project_config import ProjectConfig
-from backend.utils import load_config, logger, CAMERA_TYPES, CAMERA_DESCRIPTIONS
+from backend.task_manager import TaskManager
+from backend.utils import load_config, logger, get_openai_key, get_gemini_key
 
 app = FastAPI(title="Footballia Screenshotter")
 
@@ -51,6 +52,8 @@ class CaptureRequest(BaseModel):
     start_time: str = "00:00"
     match_data: dict = {}
     source_type: str = "footballia"
+    provider: str = "openai"
+    task_id: str = "camera_angle"
 
 
 async def broadcast(message: dict):
@@ -156,12 +159,83 @@ async def import_excel(body: ImportExcelRequest):
 @app.get("/api/config")
 async def get_config():
     config = load_config()
+    tm = TaskManager()
+    default_task = tm.get_task("camera_angle")
+    from backend.utils import get_active_categories, get_active_category_descriptions
+    categories = get_active_categories(default_task)
+    descriptions = get_active_category_descriptions(default_task)
+
     return {
         "defaults": config["defaults"],
         "sampling_interval": config["sampling"]["interval_seconds"],
-        "camera_types": CAMERA_TYPES,
-        "camera_descriptions": CAMERA_DESCRIPTIONS,
+        "camera_types": categories,
+        "camera_descriptions": descriptions,
     }
+
+
+# ── Task routes ──
+
+@app.get("/api/tasks")
+async def get_tasks():
+    """List all available tasks (summary without full prompts)."""
+    tm = TaskManager()
+    return tm.get_all_tasks()
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: str):
+    """Get full task template by ID."""
+    tm = TaskManager()
+    try:
+        task = tm.get_task(task_id)
+        return task
+    except FileNotFoundError:
+        return {"status": "error", "message": f"Task '{task_id}' not found"}
+
+
+@app.get("/api/tasks/{task_id}/presets/{preset_id}")
+async def get_preset(task_id: str, preset_id: str):
+    """Get a specific preset's targets."""
+    tm = TaskManager()
+    try:
+        targets = tm.get_preset_targets(task_id, preset_id)
+        return {"task_id": task_id, "preset_id": preset_id, "targets": targets}
+    except (FileNotFoundError, KeyError) as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ── Provider routes ──
+
+@app.get("/api/providers")
+async def get_providers():
+    """List available classification providers and their status."""
+    openai_key = get_openai_key()
+    gemini_key = get_gemini_key()
+
+    providers = [
+        {
+            "id": "openai",
+            "name": "OpenAI GPT-4o-mini",
+            "description": "Best accuracy. ~$0.07 per 1000 frames.",
+            "available": bool(openai_key and openai_key != "sk-your-key-here"),
+            "cost_per_frame": 0.00007,
+        },
+        {
+            "id": "gemini",
+            "name": "Google Gemini Flash",
+            "description": "Free tier: 1,500 req/day. Paid: ~$0.04 per 1000 frames.",
+            "available": bool(gemini_key and gemini_key != "your-gemini-key-here"),
+            "cost_per_frame": 0.00004,
+        },
+        {
+            "id": "manual",
+            "name": "Manual Classification",
+            "description": "No API needed. Frames saved to PENDING/ for human review.",
+            "available": True,
+            "cost_per_frame": 0,
+        },
+    ]
+    return providers
 
 
 # ── Capture routes ──
@@ -199,7 +273,7 @@ async def start_capture(body: CaptureRequest):
             db = MatchDB()
             capture_id = db.create_capture(
                 match_id=body.match_id,
-                provider="openai",
+                provider=body.provider,
                 source_type=source_type,
                 config={"targets": body.targets, "start_time": body.start_time},
             )
@@ -215,10 +289,12 @@ async def start_capture(body: CaptureRequest):
         config=config,
         broadcast_fn=broadcast,
         capture_id=capture_id,
+        provider=body.provider,
+        task_id=body.task_id,
     )
 
     pipeline_task = asyncio.create_task(active_pipeline.run())
-    logger.info(f"Capture started for {body.match_data.get('opponent', 'unknown')}")
+    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}")
 
     return {"status": "started"}
 
@@ -261,22 +337,27 @@ async def capture_status():
 
 @app.get("/api/health")
 async def health_check():
-    from backend.utils import get_openai_key
-    key = get_openai_key()
-    result = {"api_key_set": bool(key and key != "sk-your-key-here")}
-    if result["api_key_set"]:
+    openai_key = get_openai_key()
+    gemini_key = get_gemini_key()
+
+    result = {
+        "openai_key_set": bool(openai_key and openai_key != "sk-your-key-here"),
+        "gemini_key_set": bool(gemini_key and gemini_key != "your-gemini-key-here"),
+    }
+
+    if result["openai_key_set"]:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=key)
+            client = OpenAI(api_key=openai_key)
             models = client.models.list()
-            result["model_available"] = any("gpt-4o-mini" in m.id for m in models)
+            result["openai_model_available"] = any("gpt-4o-mini" in m.id for m in models)
             result["status"] = "ok"
         except Exception as e:
             result["status"] = "error"
             result["message"] = str(e)
     else:
-        result["status"] = "no_key"
-        result["message"] = "No OpenAI API key configured."
+        result["status"] = "ok"
+
     return result
 
 

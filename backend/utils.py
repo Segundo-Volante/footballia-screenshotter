@@ -46,6 +46,11 @@ def get_openai_key() -> str:
     return key
 
 
+def get_gemini_key() -> str:
+    key = os.getenv("GEMINI_API_KEY", "")
+    return key
+
+
 def format_time(seconds: float) -> str:
     s = int(seconds)
     h, s = divmod(s, 3600)
@@ -64,7 +69,17 @@ def parse_time(time_str: str) -> float:
     return float(parts[0])
 
 
-# Default categories — used when the task is "Camera Angle Classification"
+def get_active_categories(task: dict) -> list[str]:
+    """Extract category value list from a task template."""
+    return [c["value"] for c in task.get("categories", [])]
+
+
+def get_active_category_descriptions(task: dict) -> dict[str, str]:
+    """Extract {value: label} mapping from a task template."""
+    return {c["value"]: c.get("label", c["value"]) for c in task.get("categories", [])}
+
+
+# Default categories — used when no task is loaded (backward compat)
 DEFAULT_CATEGORIES = [
     "WIDE_CENTER",
     "WIDE_LEFT",

@@ -8,10 +8,14 @@ from typing import Callable, Awaitable, Optional
 from PIL import Image
 
 from backend.sources.base import VideoSource
-from backend.camera_classifier import CameraClassifier
+from backend.classifiers import create_classifier
 from backend.match_db import MatchDB
 from backend.output_manager import OutputManager
-from backend.utils import logger, format_time, parse_time, CAMERA_TYPES
+from backend.pre_filter import PreFilter
+from backend.adaptive_sampler import AdaptiveSampler
+from backend.consistency_checker import ConsistencyChecker
+from backend.task_manager import TaskManager
+from backend.utils import logger, format_time, parse_time, get_active_categories
 
 
 @dataclass
@@ -31,6 +35,8 @@ class Pipeline:
         config: dict,
         broadcast_fn: Callable[[dict], Awaitable[None]],
         capture_id: Optional[int] = None,
+        provider: str = "openai",
+        task_id: str = "camera_angle",
     ):
         self.source = source
         self.match = match
@@ -39,11 +45,50 @@ class Pipeline:
         self.config = config
         self.broadcast = broadcast_fn
         self.capture_id = capture_id
+        self.provider = provider
+        self.task_id = task_id
 
-        self.classifier = CameraClassifier(config["openai"], targets)
-        self.output = OutputManager(match, config["output"]["base_dir"])
+        # Load task template
+        tm = TaskManager()
+        self.task = tm.get_task(task_id)
+        self.categories = get_active_categories(self.task)
 
-        self.interval = config["sampling"].get("interval_seconds", 2.0)
+        # Create classifier
+        classifier_config = dict(config)
+        classifier_config["openai_api_key"] = config.get("openai", {}).get("api_key", "")
+        classifier_config["gemini_api_key"] = config.get("gemini", {}).get("api_key", "")
+        # Also pull from env if not in config
+        from backend.utils import get_openai_key, get_gemini_key
+        if not classifier_config["openai_api_key"]:
+            classifier_config["openai_api_key"] = get_openai_key()
+        if not classifier_config["gemini_api_key"]:
+            classifier_config["gemini_api_key"] = get_gemini_key()
+        # Pass model settings
+        classifier_config["openai_model"] = config.get("openai", {}).get("model", "gpt-4o-mini")
+        classifier_config["openai_detail"] = config.get("openai", {}).get("detail", "low")
+        classifier_config["gemini_model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
+        classifier_config["gemini_free_tier"] = config.get("gemini", {}).get("free_tier", True)
+
+        self.classifier = create_classifier(provider, self.task, classifier_config)
+        self.output = OutputManager(match, config["output"]["base_dir"], categories=self.categories)
+
+        # Pre-filter
+        pf_config = config.get("pre_filter", {})
+        self.pre_filter = PreFilter(enabled=pf_config.get("enabled", True))
+
+        # Adaptive sampler
+        sampling = config.get("sampling", {})
+        self.sampler = AdaptiveSampler(
+            base_interval=sampling.get("interval_seconds", 2.0),
+            min_interval=sampling.get("min_interval", 1.0),
+            max_interval=sampling.get("max_interval", 6.0),
+            enabled=sampling.get("adaptive", True),
+        )
+
+        # Consistency checker
+        self.consistency = ConsistencyChecker()
+
+        self.interval = sampling.get("interval_seconds", 2.0)
         self.thumbnail_width = config["output"].get("thumbnail_width", 320)
 
         self.status = "idle"
@@ -56,27 +101,43 @@ class Pipeline:
         self._stop_requested = False
         self.total_classified_local = 0
 
-        self.saved_counts: dict[str, int] = {t: 0 for t in CAMERA_TYPES}
+        self.saved_counts: dict[str, int] = {t: 0 for t in self.categories}
 
         existing = self.output.get_existing_counts()
         for cam, count in existing.items():
             self.saved_counts[cam] = count
         self._adjusted_targets = {}
-        for cam in CAMERA_TYPES:
+        for cam in self.categories:
             original = targets.get(cam, 0)
             already = existing.get(cam, 0)
             self._adjusted_targets[cam] = max(0, original - already)
             if already > 0:
                 logger.info(f"Resuming: {cam} has {already}/{original} already captured")
 
+        # Track last classification for adaptive sampler
+        self._last_classification = None
+        self._last_pre_filter = None
+
+    def _targets_met(self) -> dict[str, bool]:
+        """Return {category: True/False} where True means target is met."""
+        return {
+            cat: self.saved_counts.get(cat, 0) >= self.targets.get(cat, 0)
+            for cat in self.categories
+            if self.targets.get(cat, 0) > 0
+        }
+
+    def _all_targets_met(self) -> bool:
+        tm = self._targets_met()
+        return bool(tm) and all(tm.values())
+
     async def run(self):
         self.status = "capturing"
         self._start_wall_time = time.time()
 
         try:
-            # Source is already set up by server.py before Pipeline creation.
             self._video_duration = await self.source.get_duration()
             logger.info(f"Video duration: {self._video_duration:.1f}s")
+            logger.info(f"Provider: {self.provider}, Task: {self.task_id}")
 
             start_seconds = parse_time(self.start_time_str)
             if start_seconds > 0:
@@ -110,7 +171,7 @@ class Pipeline:
             if self.status != "error":
                 self.status = "completed"
                 total_captured = sum(self.saved_counts.values())
-                total_target = sum(self.targets.get(cam, 0) for cam in CAMERA_TYPES)
+                total_target = sum(self.targets.get(cam, 0) for cam in self.categories)
 
                 if self.capture_id:
                     try:
@@ -118,7 +179,7 @@ class Pipeline:
                         db.complete_capture(
                             self.capture_id,
                             total_captured=total_captured,
-                            total_classified=self.classifier.total_classified,
+                            total_classified=self.classifier.get_call_count(),
                             api_cost=self.classifier.get_cost(),
                             output_dir=self.output.get_output_dir(),
                             duration=duration,
@@ -134,14 +195,16 @@ class Pipeline:
                         "total_target": total_target,
                         "duration_minutes": round(duration / 60, 1),
                         "api_cost": round(self.classifier.get_cost(), 6),
+                        "provider": self.provider,
                         "output_dir": self.output.get_output_dir(),
                         "counts": {
                             cam: {
                                 "target": self.targets.get(cam, 0),
                                 "captured": self.saved_counts.get(cam, 0),
                             }
-                            for cam in CAMERA_TYPES
+                            for cam in self.categories
                         },
+                        "pre_filter_stats": self.pre_filter.get_stats(),
                     },
                 })
 
@@ -170,22 +233,39 @@ class Pipeline:
 
                 self._current_video_time = video_time
 
-                frame = CapturedFrame(
-                    jpeg_bytes=jpeg_bytes,
-                    video_time=video_time,
-                    video_part=self.source.current_part,
-                )
+                # ── Pre-filter ──
+                pf_result = self.pre_filter.analyze(jpeg_bytes)
+                self._last_pre_filter = pf_result
 
-                try:
-                    self._queue.put_nowait(frame)
-                    if self.total_classified_local < 3:
-                        logger.info(f"Captured frame at {format_time(video_time)} ({len(jpeg_bytes)} bytes), queue size: {self._queue.qsize()}")
-                except asyncio.QueueFull:
-                    logger.warning("Frame queue full, dropping frame")
+                if not pf_result["pass"]:
+                    await self.broadcast({
+                        "type": "frame_filtered",
+                        "video_time": video_time,
+                        "reason": pf_result["reason"],
+                    })
+                else:
+                    frame = CapturedFrame(
+                        jpeg_bytes=jpeg_bytes,
+                        video_time=video_time,
+                        video_part=self.source.current_part,
+                    )
+
+                    try:
+                        self._queue.put_nowait(frame)
+                        if self.total_classified_local < 3:
+                            logger.info(f"Captured frame at {format_time(video_time)} ({len(jpeg_bytes)} bytes), queue size: {self._queue.qsize()}")
+                    except asyncio.QueueFull:
+                        logger.warning("Frame queue full, dropping frame")
             else:
                 logger.warning("Screenshot returned empty")
 
-            await asyncio.sleep(self.interval)
+            # ── Adaptive interval ──
+            interval = self.sampler.get_interval(
+                last_classification=self._last_classification,
+                pre_filter_result=self._last_pre_filter or {},
+                targets_status=self._targets_met(),
+            )
+            await asyncio.sleep(interval)
 
     async def _classify_loop(self):
         while self.status in ("capturing", "paused") or not self._queue.empty():
@@ -202,56 +282,81 @@ class Pipeline:
             self.total_classified_local += 1
             logger.info(f"Classifying frame #{self.total_classified_local} at {format_time(frame.video_time)}...")
             classification = await self.classifier.classify_frame(frame.jpeg_bytes)
-            cam_type = classification["camera_type"]
+            self._last_classification = classification
+
+            classified_as = classification.get("classified_as", "OTHER")
             conf = classification.get("confidence", 0)
-            logger.info(f"Frame #{self.total_classified_local}: {cam_type} (conf={conf:.2f})")
+            is_pending = classification.get("is_pending", False)
+            logger.info(f"Frame #{self.total_classified_local}: {classified_as} (conf={conf:.2f})")
 
-            target_for_type = self._adjusted_targets.get(cam_type, 0)
-            current_saved = self.saved_counts.get(cam_type, 0)
+            # ── Consistency check ──
+            scene_changed = (self._last_pre_filter or {}).get("scene_change", False)
+            consistency = self.consistency.check(classified_as, scene_changed)
+            if consistency["anomaly"]:
+                logger.info(f"Anomaly: {consistency['note']}")
 
-            if target_for_type > 0 and current_saved < self.targets.get(cam_type, 0):
-                filepath = await self.output.save_frame(
-                    frame.jpeg_bytes, frame.video_time, classification, frame.video_part
-                )
-                self.saved_counts[cam_type] = self.saved_counts.get(cam_type, 0) + 1
-                logger.info(f"Saved {filepath.name} ({cam_type}: {self.saved_counts[cam_type]}/{self.targets.get(cam_type, 0)})")
-
-                # Record frame to SQLite for crash resilience
-                if self.capture_id:
-                    try:
-                        db = MatchDB()
-                        db.record_frame(
-                            capture_id=self.capture_id,
-                            filename=filepath.name,
-                            filepath=str(filepath),
-                            video_time=frame.video_time,
-                            video_part=frame.video_part,
-                            classification=classification,
-                        )
-                        db.close()
-                    except Exception as e:
-                        logger.debug(f"DB record_frame failed: {e}")
-
+            # ── Save decision ──
+            if is_pending:
+                filepath = self.output.save_frame_to_pending(frame.jpeg_bytes, frame.video_time)
                 thumbnail_b64 = self._make_thumbnail(frame.jpeg_bytes)
-
                 await self.broadcast({
                     "type": "frame_classified",
                     "filename": filepath.name,
                     "video_time": frame.video_time,
-                    "camera_type": cam_type,
-                    "confidence": classification["confidence"],
+                    "classified_as": "PENDING",
+                    "confidence": 0,
                     "saved": True,
                     "thumbnail_b64": thumbnail_b64,
+                    "is_pending": True,
                 })
             else:
-                await self.broadcast({
-                    "type": "frame_skipped",
-                    "video_time": frame.video_time,
-                    "camera_type": cam_type,
-                    "reason": "target_met",
-                })
+                target_for_type = self._adjusted_targets.get(classified_as, 0)
+                current_saved = self.saved_counts.get(classified_as, 0)
 
-            if self.classifier.all_targets_met(self.saved_counts):
+                if target_for_type > 0 and current_saved < self.targets.get(classified_as, 0):
+                    filepath = await self.output.save_frame(
+                        frame.jpeg_bytes, frame.video_time, classification, frame.video_part
+                    )
+                    self.saved_counts[classified_as] = self.saved_counts.get(classified_as, 0) + 1
+                    logger.info(f"Saved {filepath.name} ({classified_as}: {self.saved_counts[classified_as]}/{self.targets.get(classified_as, 0)})")
+
+                    if self.capture_id:
+                        try:
+                            db = MatchDB()
+                            db.record_frame(
+                                capture_id=self.capture_id,
+                                filename=filepath.name,
+                                filepath=str(filepath),
+                                video_time=frame.video_time,
+                                video_part=frame.video_part,
+                                classification=classification,
+                            )
+                            db.close()
+                        except Exception as e:
+                            logger.debug(f"DB record_frame failed: {e}")
+
+                    thumbnail_b64 = self._make_thumbnail(frame.jpeg_bytes)
+
+                    await self.broadcast({
+                        "type": "frame_classified",
+                        "filename": filepath.name,
+                        "video_time": frame.video_time,
+                        "classified_as": classified_as,
+                        "confidence": classification["confidence"],
+                        "saved": True,
+                        "thumbnail_b64": thumbnail_b64,
+                        "anomaly": consistency["anomaly"],
+                        "suggested_type": consistency.get("suggested_type"),
+                    })
+                else:
+                    await self.broadcast({
+                        "type": "frame_skipped",
+                        "video_time": frame.video_time,
+                        "classified_as": classified_as,
+                        "reason": "target_met",
+                    })
+
+            if self._all_targets_met():
                 logger.info("All targets met!")
                 self.status = "completed"
                 break
@@ -262,7 +367,7 @@ class Pipeline:
                 break
 
             total_captured = sum(self.saved_counts.values())
-            total_target = sum(self.targets.get(cam, 0) for cam in CAMERA_TYPES)
+            total_target = sum(self.targets.get(cam, 0) for cam in self.categories)
 
             progress = {
                 "type": "progress",
@@ -277,12 +382,14 @@ class Pipeline:
                         "target": self.targets.get(cam, 0),
                         "captured": self.saved_counts.get(cam, 0),
                     }
-                    for cam in CAMERA_TYPES
+                    for cam in self.categories
                 },
                 "total_captured": total_captured,
                 "total_target": total_target,
-                "total_classified": self.classifier.total_classified,
+                "total_classified": self.classifier.get_call_count(),
                 "api_cost": self.classifier.get_cost(),
+                "provider": self.provider,
+                "pre_filter_stats": self.pre_filter.get_stats(),
             }
             await self.broadcast(progress)
             await asyncio.sleep(1)
@@ -329,7 +436,7 @@ class Pipeline:
 
     def get_status(self) -> dict:
         total_captured = sum(self.saved_counts.values())
-        total_target = sum(self.targets.get(cam, 0) for cam in CAMERA_TYPES)
+        total_target = sum(self.targets.get(cam, 0) for cam in self.categories)
 
         return {
             "type": "progress",
@@ -342,10 +449,12 @@ class Pipeline:
                     "target": self.targets.get(cam, 0),
                     "captured": self.saved_counts.get(cam, 0),
                 }
-                for cam in CAMERA_TYPES
+                for cam in self.categories
             },
             "total_captured": total_captured,
             "total_target": total_target,
-            "total_classified": self.classifier.total_classified,
+            "total_classified": self.classifier.get_call_count(),
             "api_cost": self.classifier.get_cost(),
+            "provider": self.provider,
+            "pre_filter_stats": self.pre_filter.get_stats(),
         }

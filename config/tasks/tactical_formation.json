@@ -1,0 +1,65 @@
+{
+  "id": "tactical_formation",
+  "name": "Tactical Formation Detection",
+  "description": "Identify team formations from wide/tactical broadcast shots",
+  "version": "1.0.0",
+  "classification_field": "formation",
+  "categories": [
+    "4-4-2",
+    "4-3-3",
+    "4-2-3-1",
+    "3-5-2",
+    "3-4-3",
+    "5-3-2",
+    "5-4-1",
+    "4-1-4-1",
+    "OTHER_FORMATION",
+    "NOT_TACTICAL_SHOT"
+  ],
+  "category_descriptions": {
+    "4-4-2": "Four defenders, four midfielders, two strikers",
+    "4-3-3": "Four defenders, three midfielders, three forwards",
+    "4-2-3-1": "Four defenders, two DMs, three AMs, one striker",
+    "3-5-2": "Three CBs, five midfielders, two strikers",
+    "3-4-3": "Three CBs, four midfielders, three forwards",
+    "5-3-2": "Five defenders (3 CB + 2 WB), three midfielders, two strikers",
+    "5-4-1": "Five defenders, four midfielders, one striker",
+    "4-1-4-1": "Four defenders, one DM, four midfielders, one striker",
+    "OTHER_FORMATION": "Formation visible but doesn't match standard patterns",
+    "NOT_TACTICAL_SHOT": "Not a tactical/wide shot — cannot determine formation"
+  },
+  "prompt": "Analyze this football broadcast frame for tactical formation.\n\nIf this is a wide or tactical shot showing 7+ players of one team in a recognizable shape, identify their formation.\nIf the shot is too tight, a close-up, replay, or doesn't show enough players, classify as NOT_TACTICAL_SHOT.\n\nFormations: 4-4-2, 4-3-3, 4-2-3-1, 3-5-2, 3-4-3, 5-3-2, 5-4-1, 4-1-4-1, OTHER_FORMATION, NOT_TACTICAL_SHOT\n\nThink step by step:\n1. Is this a wide enough shot to see formations?\n2. How many players of one team are visible?\n3. Count the lines: how many defenders, midfielders, forwards?\n\nRespond with JSON only:\n{\"formation\": \"4-4-2\", \"confidence\": 0.8, \"reasoning\": \"brief explanation\", \"team_analyzed\": \"home\", \"players_visible\": 10, \"phase\": \"attacking\"}",
+  "extra_fields": ["team_analyzed", "players_visible", "phase", "reasoning"],
+  "suggested_targets": {
+    "4-4-2": 10,
+    "4-3-3": 10,
+    "4-2-3-1": 10,
+    "3-5-2": 5,
+    "3-4-3": 5,
+    "5-3-2": 5,
+    "5-4-1": 5,
+    "4-1-4-1": 5,
+    "OTHER_FORMATION": 3,
+    "NOT_TACTICAL_SHOT": 0
+  },
+  "presets": {
+    "balanced": {
+      "name": "Balanced Formation Capture",
+      "description": "Even coverage across common formations",
+      "targets": {
+        "4-4-2": 10, "4-3-3": 10, "4-2-3-1": 10, "3-5-2": 5,
+        "3-4-3": 5, "5-3-2": 5, "5-4-1": 5, "4-1-4-1": 5,
+        "OTHER_FORMATION": 3, "NOT_TACTICAL_SHOT": 0
+      }
+    },
+    "quick_test": {
+      "name": "Quick Test",
+      "description": "Small sample",
+      "targets": {
+        "4-4-2": 3, "4-3-3": 3, "4-2-3-1": 3, "3-5-2": 2,
+        "3-4-3": 2, "5-3-2": 2, "5-4-1": 2, "4-1-4-1": 2,
+        "OTHER_FORMATION": 1, "NOT_TACTICAL_SHOT": 0
+      }
+    }
+  }
+}
