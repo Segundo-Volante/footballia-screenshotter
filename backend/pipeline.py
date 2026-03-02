@@ -2,13 +2,14 @@ import asyncio
 import base64
 import io
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Awaitable
+from dataclasses import dataclass
+from typing import Callable, Awaitable, Optional
 
 from PIL import Image
 
-from backend.browser_engine import BrowserEngine
+from backend.sources.base import VideoSource
 from backend.camera_classifier import CameraClassifier
+from backend.match_db import MatchDB
 from backend.output_manager import OutputManager
 from backend.utils import logger, format_time, parse_time, CAMERA_TYPES
 
@@ -23,19 +24,22 @@ class CapturedFrame:
 class Pipeline:
     def __init__(
         self,
+        source: VideoSource,
         match: dict,
         targets: dict,
         start_time: str,
         config: dict,
         broadcast_fn: Callable[[dict], Awaitable[None]],
+        capture_id: Optional[int] = None,
     ):
+        self.source = source
         self.match = match
         self.targets = targets
         self.start_time_str = start_time
         self.config = config
         self.broadcast = broadcast_fn
+        self.capture_id = capture_id
 
-        self.browser = BrowserEngine(config["browser"])
         self.classifier = CameraClassifier(config["openai"], targets)
         self.output = OutputManager(match, config["output"]["base_dir"])
 
@@ -48,18 +52,15 @@ class Pipeline:
         self._current_video_time = 0.0
         self._video_duration = 0.0
         self._pause_event = asyncio.Event()
-        self._pause_event.set()  # Not paused initially
+        self._pause_event.set()
         self._stop_requested = False
         self.total_classified_local = 0
 
-        # Saved counts (separate from classified counts)
         self.saved_counts: dict[str, int] = {t: 0 for t in CAMERA_TYPES}
 
-        # Account for existing captures (resume support)
         existing = self.output.get_existing_counts()
         for cam, count in existing.items():
             self.saved_counts[cam] = count
-            # Reduce targets so we don't re-collect
         self._adjusted_targets = {}
         for cam in CAMERA_TYPES:
             original = targets.get(cam, 0)
@@ -73,77 +74,17 @@ class Pipeline:
         self._start_wall_time = time.time()
 
         try:
-            # Launch browser
-            await self.broadcast({"type": "status", "status": "capturing", "message": "Launching browser..."})
-            await self.browser.launch()
-
-            # Navigate
-            url = self.match.get("footballia_url", "")
-            await self.broadcast({"type": "status", "status": "capturing", "message": "Navigating to match..."})
-            if not await self.browser.navigate_to_match(url):
-                await self.broadcast({"type": "error", "message": "Failed to navigate to match URL"})
-                self.status = "error"
-                return
-
-            # Check if login is required
-            if await self.browser.is_login_required():
-                logged_in = await self.browser.wait_for_login(
-                    broadcast_fn=self.broadcast, timeout=300
-                )
-                if not logged_in:
-                    await self.broadcast({
-                        "type": "error",
-                        "message": "Login timeout. Please log in via the browser window and try again.",
-                    })
-                    self.status = "error"
-                    return
-                # Reload the page after login to get the video player
-                await self.browser.navigate_to_match(url)
-                await asyncio.sleep(3)
-
-            # Detect multi-part matches
-            await self.browser.detect_parts()
-
-            # Find video
-            await self.broadcast({"type": "status", "status": "capturing", "message": "Finding video player..."})
-            if not await self.browser.find_video_element():
-                await self.broadcast({
-                    "type": "error",
-                    "message": "Video player not found. Try reloading the page or check if the match video is available.",
-                })
-                self.status = "error"
-                return
-
-            # Start playback
-            await self.broadcast({"type": "status", "status": "capturing", "message": "Starting video playback..."})
-            await self.browser.start_playback()
-            await asyncio.sleep(2)
-
-            # Verify playback actually started
-            is_paused = await self.browser.is_video_paused()
-            current_time = await self.browser.get_video_time()
-            logger.info(f"After start_playback: paused={is_paused}, time={current_time:.1f}s")
-
-            if is_paused:
-                logger.warning("Video still paused after start_playback, retrying...")
-                await self.browser.start_playback()
-                await asyncio.sleep(2)
-                is_paused = await self.browser.is_video_paused()
-                logger.info(f"After retry: paused={is_paused}")
-
-            # Get duration
-            self._video_duration = await self.browser.get_video_duration()
+            # Source is already set up by server.py before Pipeline creation.
+            self._video_duration = await self.source.get_duration()
             logger.info(f"Video duration: {self._video_duration:.1f}s")
 
-            # Seek if needed
             start_seconds = parse_time(self.start_time_str)
             if start_seconds > 0:
-                await self.browser.seek_to(start_seconds)
+                await self.source.seek_to(start_seconds)
                 await asyncio.sleep(1)
 
             await self.broadcast({"type": "status", "status": "capturing", "message": "Capturing frames..."})
 
-            # Run three concurrent loops
             await asyncio.gather(
                 self._capture_loop(),
                 self._classify_loop(),
@@ -154,8 +95,14 @@ class Pipeline:
             logger.exception(f"Pipeline error: {e}")
             await self.broadcast({"type": "error", "message": str(e)})
             self.status = "error"
+            if self.capture_id:
+                try:
+                    db = MatchDB()
+                    db.fail_capture(self.capture_id, str(e))
+                    db.close()
+                except Exception:
+                    pass
         finally:
-            # Save reports
             self.output.generate_metadata_csv()
             duration = time.time() - self._start_wall_time
             self.output.generate_summary_json(self.classifier, duration)
@@ -164,6 +111,22 @@ class Pipeline:
                 self.status = "completed"
                 total_captured = sum(self.saved_counts.values())
                 total_target = sum(self.targets.get(cam, 0) for cam in CAMERA_TYPES)
+
+                if self.capture_id:
+                    try:
+                        db = MatchDB()
+                        db.complete_capture(
+                            self.capture_id,
+                            total_captured=total_captured,
+                            total_classified=self.classifier.total_classified,
+                            api_cost=self.classifier.get_cost(),
+                            output_dir=self.output.get_output_dir(),
+                            duration=duration,
+                        )
+                        db.close()
+                    except Exception:
+                        pass
+
                 await self.broadcast({
                     "type": "completed",
                     "summary": {
@@ -171,7 +134,7 @@ class Pipeline:
                         "total_target": total_target,
                         "duration_minutes": round(duration / 60, 1),
                         "api_cost": round(self.classifier.get_cost(), 6),
-                        "output_dir": self.output.output_dir,
+                        "output_dir": self.output.get_output_dir(),
                         "counts": {
                             cam: {
                                 "target": self.targets.get(cam, 0),
@@ -182,39 +145,35 @@ class Pipeline:
                     },
                 })
 
-            await self.browser.close()
+            await self.source.close()
 
     async def _capture_loop(self):
         while self.status == "capturing":
-            # Check pause
             await self._pause_event.wait()
             if self._stop_requested or self.status != "capturing":
                 break
 
-            # Check if video ended
-            if await self.browser.is_video_ended():
-                found_next = await self.browser.handle_video_end_and_next_part()
+            if await self.source.is_ended():
+                found_next = await self.source.handle_next_part()
                 if not found_next:
                     logger.info("Video ended, no more parts")
                     self.status = "completed"
                     break
-                self._video_duration = await self.browser.get_video_duration()
+                self._video_duration = await self.source.get_duration()
                 continue
 
-            # Capture screenshot
-            jpeg_bytes = await self.browser.screenshot_video()
+            jpeg_bytes = await self.source.capture_frame()
             if jpeg_bytes:
-                video_time = await self.browser.get_video_time()
-                # Offset for part 2
-                if self.browser.current_part > 1:
-                    video_time += self.browser.part1_duration
+                video_time = await self.source.get_current_time()
+                if self.source.current_part > 1:
+                    video_time += self.source.part1_duration
 
                 self._current_video_time = video_time
 
                 frame = CapturedFrame(
                     jpeg_bytes=jpeg_bytes,
                     video_time=video_time,
-                    video_part=self.browser.current_part,
+                    video_part=self.source.current_part,
                 )
 
                 try:
@@ -240,7 +199,6 @@ class Pipeline:
                     break
                 continue
 
-            # Classify
             self.total_classified_local += 1
             logger.info(f"Classifying frame #{self.total_classified_local} at {format_time(frame.video_time)}...")
             classification = await self.classifier.classify_frame(frame.jpeg_bytes)
@@ -252,14 +210,28 @@ class Pipeline:
             current_saved = self.saved_counts.get(cam_type, 0)
 
             if target_for_type > 0 and current_saved < self.targets.get(cam_type, 0):
-                # Save frame
                 filepath = await self.output.save_frame(
                     frame.jpeg_bytes, frame.video_time, classification, frame.video_part
                 )
                 self.saved_counts[cam_type] = self.saved_counts.get(cam_type, 0) + 1
                 logger.info(f"Saved {filepath.name} ({cam_type}: {self.saved_counts[cam_type]}/{self.targets.get(cam_type, 0)})")
 
-                # Generate thumbnail
+                # Record frame to SQLite for crash resilience
+                if self.capture_id:
+                    try:
+                        db = MatchDB()
+                        db.record_frame(
+                            capture_id=self.capture_id,
+                            filename=filepath.name,
+                            filepath=str(filepath),
+                            video_time=frame.video_time,
+                            video_part=frame.video_part,
+                            classification=classification,
+                        )
+                        db.close()
+                    except Exception as e:
+                        logger.debug(f"DB record_frame failed: {e}")
+
                 thumbnail_b64 = self._make_thumbnail(frame.jpeg_bytes)
 
                 await self.broadcast({
@@ -279,7 +251,6 @@ class Pipeline:
                     "reason": "target_met",
                 })
 
-            # Check if all targets met
             if self.classifier.all_targets_met(self.saved_counts):
                 logger.info("All targets met!")
                 self.status = "completed"
@@ -297,10 +268,10 @@ class Pipeline:
                 "type": "progress",
                 "video_time": self._current_video_time,
                 "video_duration": self._video_duration + (
-                    self.browser.part1_duration if self.browser.current_part > 1 else 0
+                    self.source.part1_duration if self.source.current_part > 1 else 0
                 ),
-                "video_part": self.browser.current_part,
-                "total_parts": self.browser.total_parts,
+                "video_part": self.source.current_part,
+                "total_parts": self.source.total_parts,
                 "counts": {
                     cam: {
                         "target": self.targets.get(cam, 0),
@@ -353,7 +324,7 @@ class Pipeline:
     def stop(self):
         self._stop_requested = True
         self.status = "completed"
-        self._pause_event.set()  # Unblock if paused
+        self._pause_event.set()
         logger.info("Stop requested")
 
     def get_status(self) -> dict:
@@ -364,8 +335,8 @@ class Pipeline:
             "type": "progress",
             "video_time": self._current_video_time,
             "video_duration": self._video_duration,
-            "video_part": self.browser.current_part,
-            "total_parts": self.browser.total_parts,
+            "video_part": self.source.current_part,
+            "total_parts": self.source.total_parts,
             "counts": {
                 cam: {
                     "target": self.targets.get(cam, 0),

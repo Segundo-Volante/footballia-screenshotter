@@ -43,8 +43,6 @@ def load_config(path: str = "config.yaml") -> dict:
 
 def get_openai_key() -> str:
     key = os.getenv("OPENAI_API_KEY", "")
-    if not key or key == "sk-your-key-here":
-        raise ValueError("Set OPENAI_API_KEY in .env file")
     return key
 
 
@@ -66,7 +64,8 @@ def parse_time(time_str: str) -> float:
     return float(parts[0])
 
 
-CAMERA_TYPES = [
+# Default categories — used when the task is "Camera Angle Classification"
+DEFAULT_CATEGORIES = [
     "WIDE_CENTER",
     "WIDE_LEFT",
     "WIDE_RIGHT",
@@ -77,7 +76,7 @@ CAMERA_TYPES = [
     "OTHER",
 ]
 
-CAMERA_DESCRIPTIONS = {
+DEFAULT_CATEGORY_DESCRIPTIONS = {
     "WIDE_CENTER": "Main broadcast camera, full pitch view",
     "WIDE_LEFT": "Broadcast camera panned to follow left side",
     "WIDE_RIGHT": "Broadcast camera panned to follow right side",
@@ -87,3 +86,7 @@ CAMERA_DESCRIPTIONS = {
     "AERIAL": "Spider cam, overhead bird's eye view",
     "OTHER": "Crowd, graphics, scoreboard, replays",
 }
+
+# Backward compatibility aliases
+CAMERA_TYPES = DEFAULT_CATEGORIES
+CAMERA_DESCRIPTIONS = DEFAULT_CATEGORY_DESCRIPTIONS

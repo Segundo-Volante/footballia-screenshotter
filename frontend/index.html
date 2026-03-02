@@ -12,20 +12,81 @@
 <body>
     <div class="container">
 
-        <!-- ===== VIEW 1: MATCH SELECTOR ===== -->
-        <div id="view-select" class="view active">
+        <!-- ===== VIEW 0: FIRST-RUN SETUP ===== -->
+        <div id="view-setup" class="view">
+            <header class="page-header">
+                <div class="logo">&#9917;</div>
+                <div>
+                    <h1>Welcome to Footballia Screenshotter</h1>
+                    <p class="subtitle">Let's set up your project</p>
+                </div>
+            </header>
+            <div class="section">
+                <h3>Your Team</h3>
+                <input type="text" id="setup-team" placeholder="e.g. FC Barcelona, Juventus FC, Manchester United..." class="input-large" />
+            </div>
+            <div class="section">
+                <h3>Season</h3>
+                <input type="text" id="setup-season" placeholder="e.g. 2024-25" class="input-medium" />
+            </div>
+            <div class="section">
+                <h3>Competitions <span class="hint-inline">(optional, comma-separated)</span></h3>
+                <input type="text" id="setup-competitions" placeholder="e.g. La Liga, Champions League, Copa del Rey" class="input-large" />
+            </div>
+            <div class="section">
+                <h3>Import existing Excel? <span class="hint-inline">(optional)</span></h3>
+                <p class="section-desc">If you have a match spreadsheet (.xlsx), enter the file path. You can also add matches manually later.</p>
+                <input type="text" id="setup-excel-path" placeholder="Path to .xlsx file  e.g. data/my_matches.xlsx" class="input-large" />
+            </div>
+            <button class="btn-primary" onclick="completeSetup()">Get Started &#8594;</button>
+        </div>
+
+        <!-- ===== VIEW 1: HOME ===== -->
+        <div id="view-home" class="view">
             <header class="page-header">
                 <div class="logo">&#9917;</div>
                 <div>
                     <h1>Footballia Screenshotter</h1>
-                    <p class="subtitle">Atletico de Madrid &middot; 2024-25 La Liga</p>
+                    <p class="subtitle" id="home-subtitle"></p>
                 </div>
             </header>
+            <div class="source-cards">
+                <div class="source-card" onclick="showView('library')">
+                    <div class="source-icon">&#128203;</div>
+                    <div class="source-info">
+                        <h3>Match Library</h3>
+                        <p>Select from your saved matches</p>
+                    </div>
+                    <span class="match-count" id="home-match-count"></span>
+                </div>
+                <div class="source-card" onclick="showQuickCapture()">
+                    <div class="source-icon">&#9889;</div>
+                    <div class="source-info">
+                        <h3>Quick Capture</h3>
+                        <p>Paste a Footballia URL and start immediately</p>
+                    </div>
+                </div>
+                <div class="source-card disabled" title="Coming in a future update">
+                    <div class="source-icon">&#128193;</div>
+                    <div class="source-info">
+                        <h3>Local Video File</h3>
+                        <p>.mp4, .mkv &mdash; coming soon</p>
+                    </div>
+                </div>
+            </div>
+            <div class="home-footer">
+                <button class="btn-text" onclick="showAddMatchDialog()">+ Add Match</button>
+                <button class="btn-text" onclick="showImportDialog()">Import Excel</button>
+            </div>
+        </div>
 
+        <!-- ===== VIEW 2: MATCH LIBRARY ===== -->
+        <div id="view-library" class="view">
+            <button class="back-btn" onclick="showView('home')">&#8592; Back</button>
+            <h2>Match Library</h2>
             <div class="search-bar">
                 <input type="text" id="match-search" placeholder="Search matches..." autocomplete="off" />
             </div>
-
             <div class="table-wrap">
                 <table class="match-table" id="match-table">
                     <thead>
@@ -39,103 +100,119 @@
                             <th>URL</th>
                         </tr>
                     </thead>
-                    <tbody id="match-tbody">
-                    </tbody>
+                    <tbody id="match-tbody"></tbody>
                 </table>
             </div>
-
-            <p class="hint">Select a match to begin. Matches without a Footballia URL are disabled.</p>
+            <p class="hint">Click a match to configure capture. Click the URL column to add/edit a Footballia URL.</p>
         </div>
 
-        <!-- ===== VIEW 2: CONFIGURATION ===== -->
-        <div id="view-config" class="view">
-            <button class="back-btn" onclick="showView('select')">&#8592; Back</button>
+        <!-- MODALS -->
+        <div id="quick-capture-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>&#9889; Quick Capture</h3>
+                <p class="section-desc">Paste a Footballia match URL to start capturing immediately with default targets.</p>
+                <input type="text" id="quick-url" placeholder="https://footballia.eu/matches/..." class="input-large" />
+                <div class="quick-meta">
+                    <input type="text" id="quick-opponent" placeholder="Opponent name (optional)" class="input-medium" />
+                    <input type="text" id="quick-date" placeholder="Date (optional)" class="input-medium" />
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideQuickCapture()">Cancel</button>
+                    <button class="btn-primary modal-primary" onclick="startQuickCapture()">Start with Defaults &#8594;</button>
+                </div>
+            </div>
+        </div>
+        <div id="add-match-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>Add Match</h3>
+                <div class="form-grid">
+                    <label>Match Day <input type="number" id="add-md" min="0" /></label>
+                    <label>Date <input type="date" id="add-date" /></label>
+                    <label>Home/Away <select id="add-ha"><option value="H">Home</option><option value="A">Away</option></select></label>
+                    <label>Opponent <input type="text" id="add-opponent" /></label>
+                    <label>Score <input type="text" id="add-score" placeholder="e.g. 3-0" /></label>
+                    <label>Footballia URL <input type="text" id="add-url" placeholder="https://footballia.eu/matches/..." /></label>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideAddMatch()">Cancel</button>
+                    <button class="btn-primary modal-primary" onclick="saveNewMatch()">Add Match</button>
+                </div>
+            </div>
+        </div>
+        <div id="import-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>Import Excel</h3>
+                <p class="section-desc">Enter the path to your .xlsx file. Must have a "Match Data" sheet.</p>
+                <input type="text" id="import-path" placeholder="e.g. data/my_team_matches.xlsx" class="input-large" />
+                <label style="display:block;margin-top:12px;font-size:13px;color:var(--text-secondary);">Competition
+                    <input type="text" id="import-competition" placeholder="e.g. La Liga" class="input-medium" style="margin-top:4px;" />
+                </label>
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideImportDialog()">Cancel</button>
+                    <button class="btn-primary modal-primary" onclick="doImportExcel()">Import</button>
+                </div>
+            </div>
+        </div>
+        <div id="url-edit-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3 id="url-edit-title">Edit Footballia URL</h3>
+                <input type="text" id="url-edit-input" placeholder="https://footballia.eu/matches/..." class="input-large" />
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideUrlEdit()">Cancel</button>
+                    <button class="btn-primary modal-primary" onclick="saveUrl()">Save</button>
+                </div>
+            </div>
+        </div>
 
+        <!-- ===== VIEW 3: CONFIGURATION ===== -->
+        <div id="view-config" class="view">
+            <button class="back-btn" id="config-back-btn" onclick="showView('library')">&#8592; Back</button>
             <div class="match-header">
                 <h2 id="config-match-title"></h2>
                 <p class="match-date" id="config-match-date"></p>
             </div>
-
             <div class="section">
                 <h3>Screenshot Targets</h3>
                 <p class="section-desc">Set how many screenshots you need for each camera angle.</p>
-
-                <div class="target-grid" id="target-inputs">
-                </div>
+                <div class="target-grid" id="target-inputs"></div>
             </div>
-
             <div class="divider"></div>
-
             <div class="section">
                 <h3>Starting Position</h3>
                 <div class="radio-group">
-                    <label class="radio-label">
-                        <input type="radio" name="start-pos" value="beginning" checked />
-                        <span>Start from beginning</span>
-                    </label>
-                    <label class="radio-label">
-                        <input type="radio" name="start-pos" value="custom" />
-                        <span>Start from specific time</span>
-                    </label>
+                    <label class="radio-label"><input type="radio" name="start-pos" value="beginning" checked /><span>Start from beginning</span></label>
+                    <label class="radio-label"><input type="radio" name="start-pos" value="custom" /><span>Start from specific time</span></label>
                 </div>
-                <input type="text" id="start-time-input" class="time-input"
-                       placeholder="MM:SS  e.g. 35:00" disabled />
+                <input type="text" id="start-time-input" class="time-input" placeholder="MM:SS  e.g. 35:00" disabled />
             </div>
-
             <div class="divider"></div>
-
-            <div class="summary-bar" id="summary-bar">
+            <div class="summary-bar">
                 Total: <span class="mono" id="total-count">0</span> screenshots &middot;
                 Est. cost: <span class="mono" id="est-cost">$0.000</span>
             </div>
-
-            <button class="btn-primary" id="start-btn" onclick="startCapture()">
-                &#9654; Start Capture
-            </button>
+            <button class="btn-primary" onclick="startCapture()">&#9654; Start Capture</button>
         </div>
 
-        <!-- ===== VIEW 3: LIVE DASHBOARD ===== -->
+        <!-- ===== VIEW 4: LIVE DASHBOARD ===== -->
         <div id="view-dashboard" class="view">
             <div id="dashboard-capturing">
                 <div class="dash-header">
                     <h2 id="dash-match-title"></h2>
-                    <p class="dash-meta">
-                        Video: <span class="mono" id="video-time">00:00</span>
-                        / <span class="mono" id="video-duration">00:00</span>
-                        &middot; <span id="video-part">Part 1 of 1</span>
-                    </p>
+                    <p class="dash-meta">Video: <span class="mono" id="video-time">00:00</span> / <span class="mono" id="video-duration">00:00</span> &middot; <span id="video-part">Part 1 of 1</span></p>
                 </div>
-
                 <div class="overall-progress">
-                    <div class="progress-bar-container large">
-                        <div class="progress-bar-fill" id="overall-bar"></div>
-                    </div>
+                    <div class="progress-bar-container large"><div class="progress-bar-fill" id="overall-bar"></div></div>
                     <span class="mono overall-pct" id="overall-pct">0%</span>
                 </div>
-
                 <table class="progress-table">
-                    <thead>
-                        <tr>
-                            <th>Camera Angle</th>
-                            <th class="col-num">Target</th>
-                            <th class="col-num">Captured</th>
-                            <th>Progress</th>
-                        </tr>
-                    </thead>
-                    <tbody id="progress-tbody">
-                    </tbody>
+                    <thead><tr><th>Camera Angle</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Progress</th></tr></thead>
+                    <tbody id="progress-tbody"></tbody>
                 </table>
-
-                <div class="dash-totals">
-                    Total: <span class="mono" id="total-progress">0 / 0</span> captured
-                    &middot; <span class="mono" id="api-cost">$0.0000</span> spent
-                </div>
-
+                <div class="dash-totals">Total: <span class="mono" id="total-progress">0 / 0</span> captured &middot; <span class="mono" id="api-cost">$0.0000</span> spent</div>
                 <div class="dash-controls">
-                    <button class="btn-pause" id="btn-pause" onclick="sendAction('pause')">&#9208; Pause</button>
-                    <button class="btn-stop" id="btn-stop" onclick="sendAction('stop')">&#9632; Stop</button>
+                    <button class="btn-pause" onclick="sendAction('pause')">&#9208; Pause</button>
+                    <button class="btn-stop" onclick="sendAction('stop')">&#9632; Stop</button>
                 </div>
-
                 <div class="latest-capture">
                     <h4>Latest capture</h4>
                     <div class="latest-frame">
@@ -143,15 +220,11 @@
                         <p class="mono" id="latest-info">Waiting for first frame...</p>
                     </div>
                 </div>
-
                 <div class="activity-log-section">
                     <h4>Activity log</h4>
-                    <div class="activity-log" id="activity-log">
-                    </div>
+                    <div class="activity-log" id="activity-log"></div>
                 </div>
             </div>
-
-            <!-- PAUSE OVERLAY -->
             <div class="pause-overlay" id="pause-overlay">
                 <div class="pause-card">
                     <div class="pause-icon">&#9208;</div>
@@ -169,42 +242,22 @@
                     </div>
                 </div>
             </div>
-
-            <!-- COMPLETED STATE -->
             <div id="dashboard-completed" class="completed-view" style="display:none;">
-                <div class="completed-header">
-                    <span class="completed-icon">&#9989;</span>
-                    <h2>Capture Complete</h2>
-                </div>
+                <div class="completed-header"><span class="completed-icon">&#9989;</span><h2>Capture Complete</h2></div>
                 <p class="completed-match" id="completed-match-title"></p>
-
                 <table class="progress-table">
-                    <thead>
-                        <tr>
-                            <th>Camera Angle</th>
-                            <th class="col-num">Target</th>
-                            <th class="col-num">Captured</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="completed-tbody">
-                    </tbody>
+                    <thead><tr><th>Camera Angle</th><th class="col-num">Target</th><th class="col-num">Captured</th><th>Status</th></tr></thead>
+                    <tbody id="completed-tbody"></tbody>
                 </table>
-
                 <div class="completed-stats">
-                    <p>Duration: <span class="mono" id="completed-duration"></span>
-                       &middot; API cost: <span class="mono" id="completed-cost"></span></p>
+                    <p>Duration: <span class="mono" id="completed-duration"></span> &middot; API cost: <span class="mono" id="completed-cost"></span></p>
                     <p>Output: <span class="mono" id="completed-output-dir"></span></p>
                 </div>
-
-                <div class="completed-actions">
-                    <button class="btn-secondary" onclick="showView('select')">&#8592; New Capture</button>
-                </div>
+                <div class="completed-actions"><button class="btn-secondary" onclick="showView('home')">&#8592; Home</button></div>
             </div>
         </div>
 
     </div>
-
     <script src="/static/app.js"></script>
 </body>
 </html>

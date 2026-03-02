@@ -1,6 +1,7 @@
 // ===== STATE =====
 const state = {
-    currentView: 'select',
+    currentView: 'home',
+    project: null,
     matches: [],
     selectedMatch: null,
     targets: {},
@@ -14,45 +15,143 @@ const state = {
     cameraDescriptions: {},
     defaultTargets: {},
     costPerFrame: 0.00007,
+    quickCaptureMode: false,
+    editingUrlMatchId: null,
 };
 
 // ===== VIEW SWITCHING =====
 function showView(viewName) {
+    // Hide all modals when switching views
+    document.querySelectorAll('.modal').forEach(m => m.style.display = 'none');
+
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    document.getElementById(`view-${viewName}`).classList.add('active');
+    const el = document.getElementById(`view-${viewName}`);
+    if (el) el.classList.add('active');
     state.currentView = viewName;
 
     if (viewName === 'dashboard') {
         connectWebSocket();
+    }
+
+    if (viewName === 'library') {
+        loadMatches();
+    }
+
+    if (viewName === 'home') {
+        updateHomeView();
     }
 }
 
 // ===== INITIALIZATION =====
 async function init() {
     try {
-        const [matchesRes, configRes] = await Promise.all([
-            fetch('/api/matches').then(r => r.json()),
-            fetch('/api/config').then(r => r.json()),
-        ]);
+        // Check if project is set up
+        const projectRes = await fetch('/api/project').then(r => r.json());
 
-        state.matches = matchesRes;
+        if (projectRes.needs_setup) {
+            showView('setup');
+            return;
+        }
+
+        state.project = projectRes.project;
+
+        // Load config
+        const configRes = await fetch('/api/config').then(r => r.json());
         state.cameraTypes = configRes.camera_types || [];
         state.cameraDescriptions = configRes.camera_descriptions || {};
         state.defaultTargets = configRes.defaults?.targets || {};
-
-        renderMatchTable(state.matches);
 
         // Check if a capture is in progress
         const statusRes = await fetch('/api/capture/status').then(r => r.json());
         if (statusRes.status === 'capturing' || statusRes.status === 'paused') {
             showView('dashboard');
+            return;
         }
+
+        showView('home');
     } catch (e) {
         console.error('Init error:', e);
+        showView('setup');
     }
 }
 
-// ===== VIEW 1: MATCH TABLE =====
+// ===== HOME VIEW =====
+function updateHomeView() {
+    if (state.project) {
+        const sub = `${state.project.team_name} · ${state.project.season}`;
+        document.getElementById('home-subtitle').textContent = sub;
+    }
+    // Update match count
+    fetch('/api/matches').then(r => r.json()).then(matches => {
+        state.matches = matches;
+        const countEl = document.getElementById('home-match-count');
+        if (countEl) countEl.textContent = `${matches.length} matches`;
+    }).catch(() => {});
+}
+
+// ===== SETUP =====
+async function completeSetup() {
+    const teamName = document.getElementById('setup-team').value.trim();
+    const season = document.getElementById('setup-season').value.trim();
+    const comps = document.getElementById('setup-competitions').value.trim();
+    const excelPath = document.getElementById('setup-excel-path').value.trim();
+
+    if (!teamName) {
+        alert('Please enter your team name.');
+        return;
+    }
+
+    const competitions = comps ? comps.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+    try {
+        await fetch('/api/setup', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({team_name: teamName, season, competitions}),
+        });
+
+        // Import Excel if provided
+        if (excelPath) {
+            try {
+                const importRes = await fetch('/api/matches/import-excel', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filepath: excelPath, competition: competitions[0] || ''}),
+                });
+                const importData = await importRes.json();
+                if (importData.imported > 0) {
+                    console.log(`Imported ${importData.imported} matches`);
+                }
+            } catch (e) {
+                console.warn('Excel import failed:', e);
+            }
+        }
+
+        // Reload config
+        const configRes = await fetch('/api/config').then(r => r.json());
+        state.cameraTypes = configRes.camera_types || [];
+        state.cameraDescriptions = configRes.camera_descriptions || {};
+        state.defaultTargets = configRes.defaults?.targets || {};
+
+        state.project = {team_name: teamName, season, competitions};
+        showView('home');
+    } catch (e) {
+        console.error('Setup error:', e);
+        alert('Setup failed. Check console for details.');
+    }
+}
+
+// ===== MATCH LIBRARY =====
+async function loadMatches() {
+    try {
+        const matches = await fetch('/api/matches').then(r => r.json());
+        state.matches = matches;
+        renderMatchTable(matches);
+    } catch (e) {
+        console.error('Load matches error:', e);
+    }
+}
+
 function renderMatchTable(matches) {
     const tbody = document.getElementById('match-tbody');
     tbody.innerHTML = '';
@@ -63,25 +162,31 @@ function renderMatchTable(matches) {
 
         if (hasUrl) {
             tr.className = 'clickable';
-            tr.onclick = () => selectMatch(m);
+            tr.onclick = (e) => {
+                // Don't navigate if clicking the URL cell
+                if (e.target.closest('.url-cell')) return;
+                selectMatch(m);
+            };
         } else {
-            tr.className = 'disabled';
-            tr.title = 'Add URL in Excel to enable';
+            tr.className = 'no-url-row';
+            tr.onclick = (e) => {
+                if (e.target.closest('.url-cell')) return;
+            };
         }
 
         const resultClass = m.result ? `result-${m.result.charAt(0).toUpperCase()}` : '';
-        const urlIcon = hasUrl
-            ? '<span class="url-yes">&#10003;</span>'
-            : '<span class="url-no">&#10007;</span>';
+        const urlCell = hasUrl
+            ? `<td class="url-cell" onclick="showUrlEdit(${m.id}, '${(m.footballia_url || '').replace(/'/g, "\\'")}')"><span class="url-yes">&#10003;</span></td>`
+            : `<td class="url-cell" onclick="showUrlEdit(${m.id}, '')"><span class="url-no">+ add</span></td>`;
 
         tr.innerHTML = `
-            <td class="col-md">${m.md}</td>
-            <td>${m.date}</td>
-            <td>${m.home_away}</td>
-            <td>${m.opponent}</td>
-            <td class="col-score">${m.score}</td>
-            <td class="${resultClass}">${m.result}</td>
-            <td style="text-align:center">${urlIcon}</td>
+            <td class="col-md">${m.md || m.match_day || ''}</td>
+            <td>${m.date || ''}</td>
+            <td>${m.home_away || ''}</td>
+            <td>${m.opponent || ''}</td>
+            <td class="col-score">${m.score || ''}</td>
+            <td class="${resultClass}">${m.result || ''}</td>
+            ${urlCell}
         `;
 
         tbody.appendChild(tr);
@@ -95,9 +200,9 @@ document.addEventListener('DOMContentLoaded', () => {
         searchInput.addEventListener('input', () => {
             const q = searchInput.value.toLowerCase();
             const filtered = state.matches.filter(m =>
-                m.opponent.toLowerCase().includes(q) ||
-                m.date.includes(q) ||
-                String(m.md).includes(q)
+                (m.opponent || '').toLowerCase().includes(q) ||
+                (m.date || '').includes(q) ||
+                String(m.md || m.match_day || '').includes(q)
             );
             renderMatchTable(filtered);
         });
@@ -117,14 +222,210 @@ document.addEventListener('DOMContentLoaded', () => {
     init();
 });
 
-// ===== VIEW 2: CONFIGURATION =====
+// ===== QUICK CAPTURE =====
+function showQuickCapture() {
+    document.getElementById('quick-capture-modal').style.display = 'flex';
+    document.getElementById('quick-url').value = '';
+    document.getElementById('quick-opponent').value = '';
+    document.getElementById('quick-date').value = '';
+    document.getElementById('quick-url').focus();
+}
+
+function hideQuickCapture() {
+    document.getElementById('quick-capture-modal').style.display = 'none';
+}
+
+async function startQuickCapture() {
+    const url = document.getElementById('quick-url').value.trim();
+    if (!url) {
+        alert('Please paste a Footballia URL.');
+        return;
+    }
+
+    const opponent = document.getElementById('quick-opponent').value.trim() || 'Unknown';
+    const date = document.getElementById('quick-date').value.trim() || '';
+
+    // Use default targets
+    const targets = {};
+    state.cameraTypes.forEach(type => {
+        targets[type] = state.defaultTargets[type] || 0;
+    });
+
+    state.quickCaptureMode = true;
+    state.selectedMatch = {
+        opponent,
+        date,
+        home_away: '',
+        md: 0,
+        match_day: 0,
+        score: '',
+        footballia_url: url,
+    };
+    state.targets = targets;
+
+    hideQuickCapture();
+
+    // Go to config view for review/adjustment
+    const ha = '';
+    document.getElementById('config-match-title').textContent = `Quick Capture · ${opponent}`;
+    document.getElementById('config-match-date').textContent = date || 'Footballia URL';
+    document.getElementById('config-back-btn').onclick = () => showView('home');
+
+    renderTargetInputs();
+    updateSummary();
+    showView('config');
+}
+
+// ===== URL EDITING =====
+function showUrlEdit(matchId, currentUrl) {
+    state.editingUrlMatchId = matchId;
+    document.getElementById('url-edit-input').value = currentUrl || '';
+    const match = state.matches.find(m => m.id === matchId);
+    document.getElementById('url-edit-title').textContent =
+        match ? `Edit URL · ${match.opponent}` : 'Edit Footballia URL';
+    document.getElementById('url-edit-modal').style.display = 'flex';
+    document.getElementById('url-edit-input').focus();
+}
+
+function hideUrlEdit() {
+    document.getElementById('url-edit-modal').style.display = 'none';
+    state.editingUrlMatchId = null;
+}
+
+async function saveUrl() {
+    const url = document.getElementById('url-edit-input').value.trim();
+    const matchId = state.editingUrlMatchId;
+    if (!matchId) return;
+
+    try {
+        await fetch(`/api/matches/${matchId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({footballia_url: url}),
+        });
+        hideUrlEdit();
+        loadMatches();
+    } catch (e) {
+        console.error('Save URL error:', e);
+        alert('Failed to save URL.');
+    }
+}
+
+// ===== ADD MATCH =====
+function showAddMatchDialog() {
+    document.getElementById('add-match-modal').style.display = 'flex';
+    document.getElementById('add-md').value = '';
+    document.getElementById('add-date').value = '';
+    document.getElementById('add-ha').value = 'H';
+    document.getElementById('add-opponent').value = '';
+    document.getElementById('add-score').value = '';
+    document.getElementById('add-url').value = '';
+}
+
+function hideAddMatch() {
+    document.getElementById('add-match-modal').style.display = 'none';
+}
+
+async function saveNewMatch() {
+    const opponent = document.getElementById('add-opponent').value.trim();
+    if (!opponent) {
+        alert('Please enter the opponent name.');
+        return;
+    }
+
+    const score = document.getElementById('add-score').value.trim();
+    let result = '';
+    if (score) {
+        const parts = score.split('-').map(s => parseInt(s.trim()));
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+            const ha = document.getElementById('add-ha').value;
+            const [a, b] = ha === 'H' ? [parts[0], parts[1]] : [parts[1], parts[0]];
+            if (a > b) result = 'W';
+            else if (a < b) result = 'L';
+            else result = 'D';
+        }
+    }
+
+    const body = {
+        match_day: parseInt(document.getElementById('add-md').value) || 0,
+        date: document.getElementById('add-date').value || '',
+        home_away: document.getElementById('add-ha').value,
+        opponent,
+        score,
+        result,
+        footballia_url: document.getElementById('add-url').value.trim(),
+        competition: state.project?.competitions?.[0] || '',
+        season: state.project?.season || '',
+        team_name: state.project?.team_name || '',
+    };
+
+    try {
+        await fetch('/api/matches', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        hideAddMatch();
+        loadMatches();
+    } catch (e) {
+        console.error('Add match error:', e);
+        alert('Failed to add match.');
+    }
+}
+
+// ===== IMPORT EXCEL =====
+function showImportDialog() {
+    document.getElementById('import-modal').style.display = 'flex';
+    document.getElementById('import-path').value = '';
+    document.getElementById('import-competition').value = '';
+}
+
+function hideImportDialog() {
+    document.getElementById('import-modal').style.display = 'none';
+}
+
+async function doImportExcel() {
+    const filepath = document.getElementById('import-path').value.trim();
+    if (!filepath) {
+        alert('Please enter the path to your Excel file.');
+        return;
+    }
+
+    const competition = document.getElementById('import-competition').value.trim();
+
+    try {
+        const res = await fetch('/api/matches/import-excel', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filepath, competition}),
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            alert(`Imported ${data.imported} matches.`);
+            hideImportDialog();
+            loadMatches();
+        } else {
+            alert(data.message || 'Import failed.');
+        }
+    } catch (e) {
+        console.error('Import error:', e);
+        alert('Import failed. Check the file path and try again.');
+    }
+}
+
+// ===== VIEW 3: CONFIGURATION =====
 function selectMatch(match) {
     state.selectedMatch = match;
+    state.quickCaptureMode = false;
 
-    const ha = match.home_away === 'H' ? '(H)' : '(A)';
+    const teamName = state.project?.team_name || 'Team';
+    const ha = match.home_away === 'H' ? '(H)' : match.home_away === 'A' ? '(A)' : '';
+    const md = match.md || match.match_day || '';
+    const mdStr = md ? `MD${md} · ` : '';
     document.getElementById('config-match-title').textContent =
-        `MD${match.md} \u00b7 ${match.opponent} ${ha} \u00b7 ${match.score}`;
-    document.getElementById('config-match-date').textContent = match.date;
+        `${mdStr}${match.opponent} ${ha} · ${match.score || ''}`;
+    document.getElementById('config-match-date').textContent = match.date || '';
+    document.getElementById('config-back-btn').onclick = () => showView('library');
 
     renderTargetInputs();
     updateSummary();
@@ -190,11 +491,12 @@ async function startCapture() {
     }
 
     const body = {
-        match_id: `MD${String(match.md).padStart(2, '0')}`,
+        match_id: match.id || null,
         footballia_url: match.footballia_url,
         targets: state.targets,
         start_time: startTime,
         match_data: match,
+        source_type: 'footballia',
     };
 
     try {
@@ -217,14 +519,16 @@ async function startCapture() {
     }
 }
 
-// ===== VIEW 3: DASHBOARD =====
+// ===== VIEW 4: DASHBOARD =====
 function setupDashboard(match) {
-    const ha = match.home_away === 'H' ? '(H)' : '(A)';
-    const title = `MD${match.md} \u00b7 ${match.opponent} ${ha} \u00b7 ${match.score}`;
+    const ha = match.home_away === 'H' ? '(H)' : match.home_away === 'A' ? '(A)' : '';
+    const md = match.md || match.match_day || '';
+    const mdStr = md ? `MD${md} · ` : '';
+    const title = `${mdStr}${match.opponent || 'Quick Capture'} ${ha} · ${match.score || ''}`;
 
     document.getElementById('dash-match-title').textContent = title;
     document.getElementById('completed-match-title').textContent =
-        `${title} \u00b7 ${match.date}`;
+        `${title} · ${match.date || ''}`;
 
     // Setup progress table
     const tbody = document.getElementById('progress-tbody');
@@ -496,7 +800,6 @@ function showCompletionSummary(summary) {
 }
 
 function showError(message) {
-    // Show in activity log
     addToActivityLog({
         camera_type: 'ERROR',
         video_time: 0,

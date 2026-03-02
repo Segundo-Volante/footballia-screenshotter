@@ -121,6 +121,10 @@ class OutputManager:
 
         logger.info(f"Wrote summary.json")
 
+    def get_output_dir(self) -> str:
+        """Return the output directory path as string."""
+        return str(self.base_path)
+
     @property
     def output_dir(self) -> str:
         return str(self.base_path)
