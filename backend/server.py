@@ -21,6 +21,7 @@ app.mount("/static", StaticFiles(directory="frontend"), name="static")
 active_pipeline: Pipeline | None = None
 pipeline_task: asyncio.Task | None = None
 ws_clients: set[WebSocket] = set()
+state_store: dict = {}  # For pending generic web source
 
 
 # ── Pydantic models ──
@@ -49,7 +50,7 @@ class ImportExcelRequest(BaseModel):
 
 class CaptureRequest(BaseModel):
     match_id: int | None = None
-    footballia_url: str
+    footballia_url: str = ""
     targets: dict[str, int]
     start_time: str = "00:00"
     match_data: dict = {}
@@ -59,6 +60,8 @@ class CaptureRequest(BaseModel):
     capture_mode: str = "full_match"
     goal_times: list[dict] = []
     goal_window: int = 30
+    local_filepath: str = ""               # For local_file source
+    generic_web_url: str = ""              # For generic_web source
 
 
 async def broadcast(message: dict):
@@ -255,11 +258,11 @@ async def start_capture(body: CaptureRequest):
     config = load_config()
 
     match_data = dict(body.match_data) if body.match_data else {}
-    match_data["footballia_url"] = body.footballia_url
-
     source_type = body.source_type or "footballia"
 
+    # ── Create the appropriate source ──
     if source_type == "footballia":
+        match_data["footballia_url"] = body.footballia_url
         from backend.sources.footballia import FootballiaSource
         source = FootballiaSource(config["browser"])
         success = await source.setup(
@@ -269,32 +272,107 @@ async def start_capture(body: CaptureRequest):
         if not success:
             return {"status": "error", "message": "Failed to connect to video. Check the URL and try again."}
 
-        # Store scraped data if available
-        if hasattr(source, 'match_data') and source.match_data.get("scrape_success"):
-            if body.match_id:
-                try:
-                    sdb = MatchDB()
-                    sdb.update_match_scraped_data(body.match_id, source.match_data)
-                    sdb.close()
-                except Exception as e:
-                    logger.warning(f"Failed to store scraped data: {e}")
-    else:
-        return {"status": "error", "message": f"Source type '{source_type}' not yet supported"}
+    elif source_type == "local_file":
+        try:
+            import cv2
+        except ImportError:
+            return {"status": "error", "message": "opencv-python not installed. Run: pip install opencv-python"}
+        from backend.sources.local_file import LocalFileSource
+        source = LocalFileSource(config)
+        success = await source.setup(filepath=body.local_filepath, broadcast_fn=broadcast)
+        if not success:
+            return {"status": "error", "message": "Failed to open video file"}
 
-    # Create capture record in database
+    elif source_type == "generic_web":
+        from backend.sources.generic_web import GenericWebSource
+        source = GenericWebSource(config.get("browser", {}))
+        success = await source.setup(url=body.generic_web_url, broadcast_fn=broadcast)
+        if not success:
+            return {"status": "error", "message": "Failed to launch browser"}
+        # For generic web, we return here and wait for user to confirm video is playing
+        # The source is stored but pipeline is NOT started yet
+        state_store["pending_source"] = source
+        state_store["pending_body"] = body
+        state_store["pending_config"] = config
+        return {"status": "waiting_for_video", "message": "Browser is open. Start the video, then click 'Video is playing'."}
+
+    else:
+        return {"status": "error", "message": f"Unknown source type: {source_type}"}
+
+    # ── Store scraped data (Footballia only) ──
+    db = MatchDB()
+    if source_type == "footballia" and hasattr(source, 'match_data') and source.match_data.get("scrape_success"):
+        if body.match_id:
+            try:
+                db.update_match_scraped_data(body.match_id, source.match_data)
+            except Exception as e:
+                logger.warning(f"Failed to store scraped data: {e}")
+
+    # ── Create capture record ──
     capture_id = None
     if body.match_id:
         try:
-            db = MatchDB()
             capture_id = db.create_capture(
                 match_id=body.match_id,
                 provider=body.provider,
                 source_type=source_type,
-                config={"targets": body.targets, "start_time": body.start_time},
+                config={"targets": body.targets, "start_time": body.start_time, "capture_mode": body.capture_mode},
             )
-            db.close()
         except Exception as e:
             logger.warning(f"Failed to create capture record: {e}")
+
+    # ── Create and start pipeline ──
+    active_pipeline = Pipeline(
+        source=source,
+        match=match_data,
+        targets=body.targets,
+        start_time=body.start_time,
+        config=config,
+        broadcast_fn=broadcast,
+        capture_id=capture_id,
+        db=db,
+        provider=body.provider,
+        task_id=body.task_id,
+        capture_mode=body.capture_mode,
+        goal_times=body.goal_times,
+        goal_window=body.goal_window,
+    )
+
+    pipeline_task = asyncio.create_task(active_pipeline.run())
+    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}, mode={body.capture_mode}, source={source_type}")
+
+    return {"status": "started", "capture_id": capture_id}
+
+
+@app.post("/api/capture/confirm-video")
+async def confirm_video_playing():
+    """User confirms video is playing in the generic web browser."""
+    global active_pipeline, pipeline_task
+
+    source = state_store.get("pending_source")
+    body = state_store.get("pending_body")
+    config = state_store.get("pending_config")
+
+    if not source:
+        return {"status": "error", "message": "No pending source"}
+
+    # Find the video element
+    found = await source.find_video_element(broadcast_fn=broadcast)
+    if not found:
+        return {"status": "error", "message": "No video found on the page"}
+
+    # Now create and start the pipeline
+    db = MatchDB()
+    match_data = dict(body.match_data) if body.match_data else {}
+
+    capture_id = None
+    if body.match_id:
+        capture_id = db.create_capture(
+            match_id=body.match_id,
+            provider=body.provider,
+            source_type="generic_web",
+            config={"targets": body.targets},
+        )
 
     active_pipeline = Pipeline(
         source=source,
@@ -304,16 +382,16 @@ async def start_capture(body: CaptureRequest):
         config=config,
         broadcast_fn=broadcast,
         capture_id=capture_id,
+        db=db,
         provider=body.provider,
         task_id=body.task_id,
         capture_mode=body.capture_mode,
-        goal_times=body.goal_times,
-        goal_window=body.goal_window,
     )
 
     pipeline_task = asyncio.create_task(active_pipeline.run())
-    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}, mode={body.capture_mode}")
 
+    # Clear pending state
+    state_store.clear()
     return {"status": "started", "capture_id": capture_id}
 
 
@@ -461,6 +539,18 @@ async def get_scraped_data(match_id: int):
     result["venue"] = match.get("venue", "")
     result["stage"] = match.get("stage", "")
     return result
+
+
+# ── Platform info ──
+
+@app.get("/api/platform")
+async def platform_info():
+    """Return platform info and dependency status."""
+    from backend.platform_utils import get_platform_info, check_dependencies
+    return {
+        "platform": get_platform_info(),
+        "dependencies": check_dependencies(),
+    }
 
 
 # ── Health check ──

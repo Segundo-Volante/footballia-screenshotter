@@ -40,6 +40,7 @@ class Pipeline:
         capture_mode: str = "full_match",
         goal_times: list[dict] = None,
         goal_window: int = 30,
+        db: Optional["MatchDB"] = None,
     ):
         self.source = source
         self.match = match
@@ -48,6 +49,7 @@ class Pipeline:
         self.config = config
         self.broadcast = broadcast_fn
         self.capture_id = capture_id
+        self.db = db
         self.provider = provider
         self.task_id = task_id
         self.capture_mode = capture_mode
@@ -120,7 +122,9 @@ class Pipeline:
         self._queue: asyncio.Queue[CapturedFrame] = asyncio.Queue(maxsize=20)
         self._start_wall_time = 0.0
         self._current_video_time = 0.0
+        self._current_capture_time = 0.0  # For local file seeking model
         self._video_duration = 0.0
+        self._capture_duration = 0.0  # Wall-clock duration of capture
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._stop_requested = False
@@ -165,9 +169,11 @@ class Pipeline:
             logger.info(f"Provider: {self.provider}, Task: {self.task_id}")
 
             start_seconds = parse_time(self.start_time_str)
+            self._current_capture_time = start_seconds
             if start_seconds > 0:
                 await self.source.seek_to(start_seconds)
-                await asyncio.sleep(1)
+                if self.source.get_source_name() != "local_file":
+                    await asyncio.sleep(1)
 
             await self.broadcast({"type": "status", "status": "capturing", "message": "Capturing frames..."})
 
@@ -186,14 +192,16 @@ class Pipeline:
             self.status = "error"
             if self.capture_id:
                 try:
-                    db = MatchDB()
+                    db = self.db or MatchDB()
                     db.fail_capture(self.capture_id, str(e))
-                    db.close()
+                    if not self.db:
+                        db.close()
                 except Exception:
                     pass
         finally:
             self.output.generate_metadata_csv()
             duration = time.time() - self._start_wall_time
+            self._capture_duration = duration
             self.output.generate_summary_json(self.classifier, duration)
 
             if self.status != "error":
@@ -203,7 +211,7 @@ class Pipeline:
 
                 if self.capture_id:
                     try:
-                        db = MatchDB()
+                        db = self.db or MatchDB()
                         db.complete_capture(
                             self.capture_id,
                             total_captured=total_captured,
@@ -212,7 +220,8 @@ class Pipeline:
                             output_dir=self.output.get_output_dir(),
                             duration=duration,
                         )
-                        db.close()
+                        if not self.db:
+                            db.close()
                     except Exception:
                         pass
 
@@ -236,27 +245,110 @@ class Pipeline:
                     },
                 })
 
+                # ── Generate annotation_ready/ package ──
+                try:
+                    from backend.annotation_bridge import AnnotationBridge
+                    import json as _json
+                    from pathlib import Path
+
+                    # Load scraped data if available
+                    scraped = {}
+                    if self.db and self.match.get("id"):
+                        match_record = self.db.get_match(self.match["id"])
+                        if match_record:
+                            for field in ["home_lineup_json", "away_lineup_json", "home_coach_json",
+                                          "away_coach_json", "goals_json", "result_json"]:
+                                val = match_record.get(field, "")
+                                if val:
+                                    try:
+                                        scraped[field.replace("_json", "")] = _json.loads(val)
+                                    except Exception:
+                                        pass
+                            scraped["home_team"] = match_record.get("team_name", "")
+                            scraped["away_team"] = match_record.get("opponent", "")
+                            scraped["venue"] = match_record.get("venue", "")
+                            scraped["stage"] = match_record.get("stage", "")
+                            scraped["season"] = match_record.get("season", "")
+                            scraped["competition"] = match_record.get("competition", "")
+
+                    # Get all frame records for this capture
+                    frames = []
+                    if self.db and self.capture_id:
+                        frames = self.db.get_capture_frames(self.capture_id)
+
+                    if frames:
+                        # Load custom bridge mapping if it exists
+                        bridge_mapping = None
+                        bridge_file = Path("config/annotation_bridge.json")
+                        if bridge_file.exists():
+                            try:
+                                bridge_data = _json.loads(bridge_file.read_text(encoding="utf-8"))
+                                bridge_mapping = bridge_data.get("mapping")
+                            except Exception:
+                                pass
+
+                        capture_data = {
+                            "provider": self.provider,
+                            "task_id": self.task.get("id", "camera_angle"),
+                            "capture_mode": self.capture_mode,
+                            "source_type": self.source.get_source_name(),
+                            "api_cost": self.classifier.get_cost(),
+                            "api_calls": self.classifier.get_call_count(),
+                            "duration_seconds": self._capture_duration,
+                            "filter_stats": self.pre_filter.get_stats(),
+                            "pre_filter_enabled": self.pre_filter.enabled,
+                            "adaptive": self.sampler.enabled,
+                            "interval_base": self.sampler.base_interval,
+                        }
+
+                        bridge = AnnotationBridge(
+                            output_dir=self.output.get_output_dir(),
+                            match_data=dict(self.match),
+                            capture_data=capture_data,
+                            bridge_mapping=bridge_mapping,
+                        )
+                        ready_path = bridge.generate(frames, scraped)
+
+                        await self.broadcast({
+                            "type": "annotation_ready",
+                            "path": ready_path,
+                            "frames": len(frames),
+                        })
+
+                except Exception as e:
+                    logger.warning(f"annotation_ready generation failed (non-fatal): {e}")
+
             await self.source.close()
 
     async def _capture_loop(self):
+        is_local = self.source.get_source_name() == "local_file"
+
         while self.status == "capturing":
             await self._pause_event.wait()
             if self._stop_requested or self.status != "capturing":
                 break
 
-            if await self.source.is_ended():
-                found_next = await self.source.handle_next_part()
-                if not found_next:
-                    logger.info("Video ended, no more parts")
+            if is_local:
+                # Local file: explicitly seek to next timestamp
+                if self._current_capture_time >= await self.source.get_duration():
+                    logger.info("Local file: reached end of video")
                     self.status = "completed"
                     break
-                self._video_duration = await self.source.get_duration()
-                continue
+                await self.source.seek_to(self._current_capture_time)
+            else:
+                if await self.source.is_ended():
+                    found_next = await self.source.handle_next_part()
+                    if not found_next:
+                        logger.info("Video ended, no more parts")
+                        self.status = "completed"
+                        break
+                    self._video_duration = await self.source.get_duration()
+                    continue
 
             jpeg_bytes = await self.source.capture_frame()
             if jpeg_bytes:
                 video_time = await self.source.get_current_time()
-                if self.source.current_part > 1:
+                if not is_local and self.source.current_part > 1:
                     video_time += self.source.part1_duration
 
                 self._current_video_time = video_time
@@ -285,6 +377,11 @@ class Pipeline:
                     except asyncio.QueueFull:
                         logger.warning("Frame queue full, dropping frame")
             else:
+                if is_local:
+                    # End of file
+                    logger.info("Local file: no more frames")
+                    self.status = "completed"
+                    break
                 logger.warning("Screenshot returned empty")
 
             # ── Adaptive interval ──
@@ -293,7 +390,13 @@ class Pipeline:
                 pre_filter_result=self._last_pre_filter or {},
                 targets_status=self._targets_met(),
             )
-            await asyncio.sleep(interval)
+
+            if is_local:
+                # For local files, advance the seek position (no sleep needed)
+                self._current_capture_time = video_time + interval
+            else:
+                # For web sources, sleep and let the video play
+                await asyncio.sleep(interval)
 
     async def _classify_loop(self):
         while self.status in ("capturing", "paused") or not self._queue.empty():
@@ -348,10 +451,9 @@ class Pipeline:
                     self.saved_counts[classified_as] = self.saved_counts.get(classified_as, 0) + 1
                     logger.info(f"Saved {filepath.name} ({classified_as}: {self.saved_counts[classified_as]}/{self.targets.get(classified_as, 0)})")
 
-                    if self.capture_id:
+                    if self.capture_id and self.db:
                         try:
-                            db = MatchDB()
-                            db.record_frame(
+                            self.db.record_frame(
                                 capture_id=self.capture_id,
                                 filename=filepath.name,
                                 filepath=str(filepath),
@@ -359,7 +461,6 @@ class Pipeline:
                                 video_part=frame.video_part,
                                 classification=classification,
                             )
-                            db.close()
                         except Exception as e:
                             logger.debug(f"DB record_frame failed: {e}")
 
@@ -491,10 +592,9 @@ class Pipeline:
                 filepath = await self.output.save_frame(frame_bytes, video_time, classification, self.source.current_part)
                 self.saved_counts[classified_as] = self.saved_counts.get(classified_as, 0) + 1
 
-                if self.capture_id:
+                if self.capture_id and self.db:
                     try:
-                        db = MatchDB()
-                        db.record_frame(
+                        self.db.record_frame(
                             capture_id=self.capture_id,
                             filename=filepath.name,
                             filepath=str(filepath),
@@ -502,7 +602,6 @@ class Pipeline:
                             video_part=self.source.current_part,
                             classification=classification,
                         )
-                        db.close()
                     except Exception:
                         pass
 

@@ -71,3 +71,11 @@ class VideoSource(ABC):
     @abstractmethod
     def part1_duration(self) -> float:
         """Duration of part 1 (for time offset calculation in multi-part videos)."""
+
+    def has_drm(self) -> bool:
+        """True if this source may have DRM protection."""
+        return False
+
+    def requires_login(self) -> bool:
+        """True if user interaction is needed before capture can begin."""
+        return False

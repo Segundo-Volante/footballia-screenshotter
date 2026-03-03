@@ -33,6 +33,10 @@ const state = {
     scrapedGoals: [],
     scrapedData: null,
     activeCaptureId: null,
+    // Part 4 additions
+    selectedSourceType: 'footballia',
+    platformInfo: null,
+    annotationReadyPath: null,
 };
 
 // ===== VIEW SWITCHING =====
@@ -82,6 +86,20 @@ async function init() {
         state.cameraTypes = configRes.camera_types || [];
         state.cameraDescriptions = configRes.camera_descriptions || {};
         state.defaultTargets = configRes.defaults?.targets || {};
+
+        // Load platform info
+        try {
+            const platformRes = await fetch('/api/platform').then(r => r.json());
+            state.platformInfo = platformRes.platform;
+
+            // Show DRM note on generic web card if macOS
+            if (state.platformInfo?.drm_bypass_warning) {
+                const note = document.getElementById('drm-note');
+                if (note) note.textContent = 'DRM limited on macOS';
+            }
+        } catch (e) {
+            console.log('Platform info not available');
+        }
 
         const statusRes = await fetch('/api/capture/status').then(r => r.json());
         if (statusRes.status === 'capturing' || statusRes.status === 'paused') {
@@ -267,6 +285,7 @@ async function startQuickCapture() {
     });
 
     state.quickCaptureMode = true;
+    state.selectedSourceType = 'footballia';
     state.selectedMatch = {
         opponent,
         date,
@@ -428,6 +447,7 @@ async function doImportExcel() {
 function selectMatch(match) {
     state.selectedMatch = match;
     state.quickCaptureMode = false;
+    state.selectedSourceType = 'footballia';
 
     const ha = match.home_away === 'H' ? '(H)' : match.home_away === 'A' ? '(A)' : '';
     const md = match.md || match.match_day || '';
@@ -665,13 +685,17 @@ async function startCapture() {
         startTime = timeInput.value || '00:00';
     }
 
+    const sourceType = state.selectedSourceType || 'footballia';
+
     const body = {
         match_id: match.id || null,
-        footballia_url: match.footballia_url,
+        footballia_url: match.footballia_url || '',
+        local_filepath: match.local_filepath || '',
+        generic_web_url: match.generic_web_url || '',
         targets: state.targets,
         start_time: startTime,
         match_data: match,
-        source_type: 'footballia',
+        source_type: sourceType,
         provider: state.selectedProvider,
         task_id: state.selectedTask || 'camera_angle',
         capture_mode: state.captureMode,
@@ -691,6 +715,9 @@ async function startCapture() {
             state.activeCaptureId = data.capture_id;
             setupDashboard(match);
             showView('dashboard');
+        } else if (data.status === 'waiting_for_video') {
+            // Generic web: show the "waiting for video" modal
+            document.getElementById('waiting-video-modal').style.display = 'flex';
         } else {
             alert(data.message || 'Failed to start capture');
         }
@@ -782,6 +809,16 @@ function connectWebSocket() {
                 showCompletionSummary(msg.summary);
                 document.getElementById('completion-actions').style.display = '';
                 showCompletionActions(msg.summary);
+                break;
+            case 'annotation_ready':
+                state.annotationReadyPath = msg.path;
+                addToActivityLog({
+                    type: 'frame_classified',
+                    classified_as: 'INFO',
+                    filename: `annotation_ready/ generated: ${msg.frames} frames`,
+                    video_time: 0,
+                    saved: false,
+                });
                 break;
             case 'error':
                 showError(msg.message);
@@ -1355,6 +1392,20 @@ function showCompletionActions(summary) {
         </button>
     `;
 
+    // Add annotation_ready info if available
+    if (state.annotationReadyPath) {
+        html += `
+            <div class="annotation-ready-info">
+                <span class="annotation-ready-icon">&#128230;</span>
+                <div>
+                    <strong>Annotation Tool ready</strong>
+                    <p class="annotation-ready-path">${state.annotationReadyPath}</p>
+                    <p class="hint">Open this folder in the Football Annotation Tool to start annotating with pre-filled metadata and rosters.</p>
+                </div>
+            </div>
+        `;
+    }
+
     actionsDiv.innerHTML = html;
 }
 
@@ -1423,6 +1474,113 @@ function addCustomRange() {
 
 function removeCustomRange(btn) {
     btn.closest('.custom-range-row').remove();
+}
+
+// ===== LOCAL FILE HANDLERS =====
+
+function showLocalFileDialog() {
+    document.getElementById('local-file-modal').style.display = 'flex';
+    document.getElementById('local-filepath').focus();
+}
+
+function hideLocalFile() {
+    document.getElementById('local-file-modal').style.display = 'none';
+}
+
+async function openLocalFile() {
+    const filepath = document.getElementById('local-filepath').value.trim();
+    if (!filepath) {
+        alert('Please enter a file path');
+        return;
+    }
+
+    const opponent = document.getElementById('local-opponent').value.trim() || 'Local Match';
+    const date = document.getElementById('local-date').value.trim() || '';
+
+    state.selectedMatch = {
+        opponent: opponent,
+        date: date,
+        home_away: '',
+        md: 0,
+        score: '',
+        footballia_url: '',
+        local_filepath: filepath,
+    };
+    state.selectedSourceType = 'local_file';
+    state.quickCaptureMode = false;
+
+    hideLocalFile();
+    showConfigView(state.selectedMatch);
+}
+
+// ===== GENERIC WEB HANDLERS =====
+
+function showGenericWebDialog() {
+    document.getElementById('generic-web-modal').style.display = 'flex';
+
+    // Show platform warning if macOS
+    if (state.platformInfo?.drm_bypass_warning) {
+        document.getElementById('platform-warning').style.display = '';
+        document.getElementById('platform-warning').innerHTML =
+            '<p class="warning">macOS detected — DRM-protected sites (ESPN+, DAZN, etc.) ' +
+            'may produce black screenshots. Non-DRM sites (YouTube, Footballia) work fine. ' +
+            'If you get black frames, download the video and use Local File mode instead.</p>';
+    }
+
+    document.getElementById('generic-web-url').focus();
+}
+
+function hideGenericWeb() {
+    document.getElementById('generic-web-modal').style.display = 'none';
+}
+
+async function startGenericWeb() {
+    const url = document.getElementById('generic-web-url').value.trim();
+    if (!url) {
+        alert('Please enter a URL');
+        return;
+    }
+
+    state.selectedMatch = {
+        opponent: document.getElementById('generic-opponent').value.trim() || 'Web Match',
+        date: '',
+        home_away: '',
+        md: 0,
+        score: '',
+        generic_web_url: url,
+    };
+    state.selectedSourceType = 'generic_web';
+
+    hideGenericWeb();
+
+    // Go to config view to set task/provider/targets, then start will open browser
+    showConfigView(state.selectedMatch);
+}
+
+async function confirmVideoPlaying() {
+    document.getElementById('waiting-video-modal').style.display = 'none';
+
+    try {
+        const res = await fetch('/api/capture/confirm-video', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+        });
+        const data = await res.json();
+        if (data.status === 'started') {
+            state.activeCaptureId = data.capture_id;
+            setupDashboard(state.selectedMatch);
+            showView('dashboard');
+        } else {
+            alert(data.message || 'Failed to find video');
+        }
+    } catch (e) {
+        alert('Error confirming video: ' + e.message);
+    }
+}
+
+function cancelGenericWeb() {
+    document.getElementById('waiting-video-modal').style.display = 'none';
+    showView('home');
 }
 
 // ===== HELPERS =====

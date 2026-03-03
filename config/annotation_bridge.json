@@ -1,0 +1,61 @@
+{
+    "version": "1.0.0",
+    "description": "Maps screenshotter camera_type values to football-annotation-tool fields. Edit this file to customize the mapping for your annotation workflow.",
+    "mapping": {
+        "WIDE_CENTER": {
+            "shot_type": "wide",
+            "camera_motion": "static",
+            "auto_skip": false
+        },
+        "WIDE_LEFT": {
+            "shot_type": "wide",
+            "camera_motion": "pan",
+            "auto_skip": false
+        },
+        "WIDE_RIGHT": {
+            "shot_type": "wide",
+            "camera_motion": "pan",
+            "auto_skip": false
+        },
+        "MEDIUM": {
+            "shot_type": "medium",
+            "camera_motion": "static",
+            "auto_skip": false
+        },
+        "CLOSEUP": {
+            "shot_type": "close-up",
+            "camera_motion": "static",
+            "auto_skip": false
+        },
+        "BEHIND_GOAL": {
+            "shot_type": "behind-goal",
+            "camera_motion": "static",
+            "auto_skip": false
+        },
+        "AERIAL": {
+            "shot_type": "aerial",
+            "camera_motion": "static",
+            "auto_skip": false
+        },
+        "OTHER": {
+            "shot_type": "other",
+            "camera_motion": "unknown",
+            "auto_skip": true
+        }
+    },
+    "export_filename_mapping": {
+        "_comment": "Maps scraped competition/stage to annotation tool export filename fields",
+        "source_from": "competition",
+        "round_from": "stage",
+        "transforms": {
+            "La Liga": "LaLiga",
+            "Champions League": "ChampionsLeague",
+            "European Cup": "EuropeanCup",
+            "Copa del Rey": "CopaDelRey",
+            "Serie A": "SerieA",
+            "Premier League": "PremierLeague",
+            "Bundesliga": "Bundesliga",
+            "Ligue 1": "Ligue1"
+        }
+    }
+}

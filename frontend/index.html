@@ -66,12 +66,20 @@
                         <p>Paste a Footballia URL and start immediately</p>
                     </div>
                 </div>
-                <div class="source-card disabled" title="Coming in a future update">
+                <div class="source-card" onclick="showLocalFileDialog()">
                     <div class="source-icon">&#128193;</div>
                     <div class="source-info">
                         <h3>Local Video File</h3>
-                        <p>.mp4, .mkv &mdash; coming soon</p>
+                        <p>.mp4, .mkv, .avi &mdash; from your computer</p>
                     </div>
+                </div>
+                <div class="source-card" onclick="showGenericWebDialog()">
+                    <div class="source-icon">&#128279;</div>
+                    <div class="source-info">
+                        <h3>Other Streaming Site</h3>
+                        <p>ESPN+, Paramount+, YouTube, any video site</p>
+                    </div>
+                    <span class="source-note" id="drm-note"></span>
                 </div>
             </div>
             <div class="home-footer">
@@ -161,6 +169,70 @@
                     <button class="btn-secondary" onclick="hideUrlEdit()">Cancel</button>
                     <button class="btn-primary modal-primary" onclick="saveUrl()">Save</button>
                 </div>
+            </div>
+        </div>
+
+        <!-- ===== LOCAL FILE MODAL ===== -->
+        <div id="local-file-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>&#128193; Local Video File</h3>
+                <p>Enter the path to a video file on your computer.</p>
+
+                <input type="text" id="local-filepath" placeholder="/path/to/match.mp4" class="input-large" />
+
+                <div class="quick-meta">
+                    <input type="text" id="local-opponent" placeholder="Opponent name (optional)" class="input-medium" />
+                    <input type="text" id="local-date" placeholder="Date (optional)" class="input-medium" />
+                </div>
+
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideLocalFile()">Cancel</button>
+                    <button class="btn-primary" onclick="openLocalFile()">Open File &#8594;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== GENERIC WEB MODAL ===== -->
+        <div id="generic-web-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>&#128279; Other Streaming Site</h3>
+                <p>Paste the URL of any page with a video player.</p>
+
+                <input type="text" id="generic-web-url" placeholder="https://www.espn.com/watch/..." class="input-large" />
+
+                <div class="platform-warning" id="platform-warning" style="display:none;">
+                    <!-- Populated by JS based on platform info -->
+                </div>
+
+                <p class="hint">A browser will open. Log in and start the video manually, then come back here and click "Video is playing."</p>
+
+                <div class="quick-meta">
+                    <input type="text" id="generic-opponent" placeholder="Opponent name (optional)" class="input-medium" />
+                </div>
+
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideGenericWeb()">Cancel</button>
+                    <button class="btn-primary" onclick="startGenericWeb()">Open Browser &#8594;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== WAITING FOR VIDEO MODAL ===== -->
+        <div id="waiting-video-modal" class="modal" style="display:none;">
+            <div class="modal-content modal-waiting">
+                <div class="waiting-spinner"></div>
+                <h3>Waiting for video...</h3>
+                <p>A browser window has opened. Please:</p>
+                <ol class="waiting-steps">
+                    <li>Log in to the streaming site (if needed)</li>
+                    <li>Navigate to the match</li>
+                    <li>Click play and make sure the video is running</li>
+                    <li>Come back here and click the button below</li>
+                </ol>
+                <button class="btn-primary" onclick="confirmVideoPlaying()">
+                    &#9654; Video is playing &mdash; Start Capture
+                </button>
+                <button class="btn-text" onclick="cancelGenericWeb()">Cancel</button>
             </div>
         </div>
 

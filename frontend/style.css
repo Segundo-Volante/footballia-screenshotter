@@ -1412,3 +1412,71 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-tertiary);
 }
+
+/* ===== Source note badge ===== */
+.source-note {
+    font-size: 0.75em;
+    color: #e67e22;
+    font-weight: 500;
+}
+
+/* ===== Waiting for video modal ===== */
+.modal-waiting {
+    text-align: center;
+}
+
+.waiting-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 16px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.waiting-steps {
+    text-align: left;
+    margin: 16px 0;
+    padding-left: 24px;
+}
+
+.waiting-steps li {
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+
+/* ===== Platform warning ===== */
+.platform-warning {
+    padding: 10px 14px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 8px;
+    margin: 12px 0;
+}
+
+/* ===== Annotation ready info ===== */
+.annotation-ready-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border-left: 3px solid var(--success);
+    margin-top: 12px;
+}
+
+.annotation-ready-icon { font-size: 1.5em; }
+
+.annotation-ready-path {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+    color: var(--text-secondary);
+    word-break: break-all;
+    margin: 4px 0;
+}
