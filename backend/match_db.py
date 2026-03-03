@@ -14,6 +14,7 @@ DB_PATH = Path("data/matches.db")
 
 class MatchDB:
     def __init__(self, db_path: Path = DB_PATH):
+        db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
@@ -78,6 +79,23 @@ class MatchDB:
                 reviewed_type TEXT DEFAULT '',
                 raw_response TEXT DEFAULT '{}',
                 created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS collection_matches (
+                collection_id INTEGER NOT NULL,
+                match_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (collection_id, match_id),
+                FOREIGN KEY (collection_id) REFERENCES collections(id),
+                FOREIGN KEY (match_id) REFERENCES matches(id)
             );
         """)
         self.conn.commit()
@@ -229,6 +247,10 @@ class MatchDB:
         )
         self.conn.commit()
 
+    def get_capture(self, capture_id: int) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
+        return dict(row) if row else None
+
     def get_capture_frames(self, capture_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM frames WHERE capture_id = ? ORDER BY video_time", (capture_id,)
@@ -307,15 +329,20 @@ class MatchDB:
         )
         self.conn.commit()
 
-    def batch_accept_frames(self, capture_id: int, min_confidence: float):
-        """Accept all frames above a confidence threshold as reviewed."""
-        self.conn.execute(
-            """UPDATE frames SET is_reviewed = 1, reviewed_type = camera_type
-               WHERE capture_id = ? AND confidence >= ? AND is_reviewed = 0""",
+    def batch_accept_frames(self, capture_id: int, min_confidence: float = 0.85) -> int:
+        """
+        Mark all unreviewed frames above the confidence threshold as reviewed (accepted).
+        The reviewed_type is set to the original camera_type (confirming the AI's classification).
+        Returns the number of frames accepted.
+        """
+        cursor = self.conn.execute(
+            """UPDATE frames
+               SET is_reviewed = 1, reviewed_type = camera_type
+               WHERE capture_id = ? AND is_reviewed = 0 AND confidence >= ?""",
             (capture_id, min_confidence),
         )
         self.conn.commit()
-        return self.conn.total_changes
+        return cursor.rowcount
 
     def get_review_stats(self, capture_id: int) -> dict:
         """Get review progress statistics for a capture."""
@@ -330,6 +357,55 @@ class MatchDB:
             FROM frames WHERE capture_id = ?
         """, (capture_id,)).fetchone()
         return dict(row) if row else {}
+
+    # ── Collections ──
+
+    def create_collection(self, name: str, description: str = "", source: str = "manual") -> int:
+        cursor = self.conn.execute(
+            "INSERT INTO collections (name, description, source) VALUES (?, ?, ?)",
+            (name, description, source),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def add_to_collection(self, collection_id: int, match_ids: list[int]):
+        for mid in match_ids:
+            try:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO collection_matches (collection_id, match_id) VALUES (?, ?)",
+                    (collection_id, mid),
+                )
+            except Exception:
+                pass
+        self.conn.commit()
+
+    def get_collections(self) -> list[dict]:
+        rows = self.conn.execute("""
+            SELECT c.id, c.name, c.description, c.source, c.created_at,
+                   COUNT(cm.match_id) as match_count,
+                   SUM(CASE WHEN f_count > 0 THEN 1 ELSE 0 END) as captured_count
+            FROM collections c
+            LEFT JOIN collection_matches cm ON cm.collection_id = c.id
+            LEFT JOIN (
+                SELECT m.id as match_id, COUNT(f.id) as f_count
+                FROM matches m
+                LEFT JOIN captures cap ON cap.match_id = m.id
+                LEFT JOIN frames f ON f.capture_id = cap.id
+                GROUP BY m.id
+            ) mf ON mf.match_id = cm.match_id
+            GROUP BY c.id
+            ORDER BY c.created_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_collection_matches(self, collection_id: int) -> list[dict]:
+        rows = self.conn.execute("""
+            SELECT m.* FROM matches m
+            JOIN collection_matches cm ON cm.match_id = m.id
+            WHERE cm.collection_id = ?
+            ORDER BY m.match_day, m.date
+        """, (collection_id,)).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

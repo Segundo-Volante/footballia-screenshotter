@@ -306,17 +306,18 @@ class FootballiaScraper:
             logger.warning(f"Result extraction error: {e}")
             return None
 
-    def resolve_goal_teams(self, match_data: dict):
+    def resolve_goal_teams(self, match_data: dict) -> list[dict]:
         """
         Cross-reference goal scorers with lineups to determine which team scored.
         Call this after both lineups and goals are extracted.
 
-        Modifies match_data["goals"] in place.
+        Modifies match_data["goals"] in place and returns the goals list.
         """
         home_names = {p["name"].lower() for p in match_data.get("home_lineup", [])}
         away_names = {p["name"].lower() for p in match_data.get("away_lineup", [])}
 
-        for goal in match_data.get("goals", []):
+        goals = match_data.get("goals", [])
+        for goal in goals:
             scorer_lower = goal["scorer"].lower()
             home_match = any(scorer_lower in name or name in scorer_lower for name in home_names)
             away_match = any(scorer_lower in name or name in scorer_lower for name in away_names)
@@ -327,3 +328,5 @@ class FootballiaScraper:
                 goal["team"] = "away"
             else:
                 goal["team"] = "unknown"
+
+        return goals

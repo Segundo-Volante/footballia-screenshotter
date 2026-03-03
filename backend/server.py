@@ -1,6 +1,9 @@
 import asyncio
 import json
+import shutil
+import time
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -12,16 +15,31 @@ from backend.pipeline import Pipeline
 from backend.project_config import ProjectConfig
 from backend.task_manager import TaskManager
 from backend.utils import load_config, logger, get_openai_key, get_gemini_key
+from backend.footballia_navigator import FootballiaNavigator
+from backend.batch_manager import BatchManager
+from backend.stats_aggregator import StatsAggregator
+from backend.exporter import DatasetExporter
 
 app = FastAPI(title="Footballia Screenshotter")
 
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+# Serve captured frames and exports as static files
+recordings_dir = Path("recordings")
+recordings_dir.mkdir(exist_ok=True)
+app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
+
+exports_dir = Path("exports")
+exports_dir.mkdir(exist_ok=True)
+app.mount("/exports", StaticFiles(directory="exports"), name="exports")
 
 # Global state
 active_pipeline: Pipeline | None = None
 pipeline_task: asyncio.Task | None = None
 ws_clients: set[WebSocket] = set()
 state_store: dict = {}  # For pending generic web source
+navigator_instance: Optional[FootballiaNavigator] = None
+batch_manager: Optional[BatchManager] = None
 
 
 # ── Pydantic models ──
@@ -60,6 +78,7 @@ class CaptureRequest(BaseModel):
     capture_mode: str = "full_match"
     goal_times: list[dict] = []
     goal_window: int = 30
+    custom_ranges: list[dict] = []         # [{"start": "15:00", "end": "20:00"}, ...]
     local_filepath: str = ""               # For local_file source
     generic_web_url: str = ""              # For generic_web source
 
@@ -72,6 +91,32 @@ async def broadcast(message: dict):
         except Exception:
             dead.add(ws)
     ws_clients.difference_update(dead)
+
+
+# ── Startup check ──
+
+def check_incomplete_captures():
+    """Check for captures that were running when the server last stopped."""
+    db = MatchDB()
+    incomplete = db.conn.execute(
+        "SELECT id, match_id FROM captures WHERE status = 'running' OR status = 'in_progress'"
+    ).fetchall()
+    if incomplete:
+        # Mark them as interrupted
+        for cap_id, match_id in incomplete:
+            db.conn.execute(
+                "UPDATE captures SET status = 'interrupted' WHERE id = ?",
+                (cap_id,),
+            )
+        db.conn.commit()
+        logger.warning(f"Found {len(incomplete)} interrupted capture(s) from previous session")
+    db.close()
+    return len(incomplete)
+
+
+@app.on_event("startup")
+async def startup_event():
+    check_incomplete_captures()
 
 
 # ── Static routes ──
@@ -101,6 +146,66 @@ async def save_setup(body: SetupRequest):
         language=body.language,
     )
     return {"status": "ok"}
+
+
+@app.delete("/api/project")
+async def delete_project():
+    """Delete the current project, all matches, captures, and recordings."""
+    global active_pipeline, pipeline_task
+
+    # Refuse if a capture is running
+    if active_pipeline and active_pipeline.status == "capturing":
+        return {"status": "error", "message": "Cannot delete project while a capture is running. Stop the capture first."}
+
+    deleted = {"project_config": False, "database": False, "recordings": 0, "batch_state": False}
+
+    try:
+        # 1. Delete project config
+        pc = ProjectConfig()
+        if pc.exists:
+            pc.delete()
+            deleted["project_config"] = True
+
+        # 2. Delete SQLite database and WAL files
+        db_path = Path("data/matches.db")
+        for suffix in ["", "-shm", "-wal"]:
+            p = db_path.parent / (db_path.name + suffix)
+            if p.exists():
+                p.unlink()
+                deleted["database"] = True
+
+        # 3. Delete all recordings
+        rec_dir = Path("recordings")
+        if rec_dir.exists():
+            for child in rec_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    deleted["recordings"] += 1
+                elif child.is_file():
+                    child.unlink()
+
+        # 4. Delete batch state if present
+        batch_state = Path("data/batch_state.json")
+        if batch_state.exists():
+            batch_state.unlink()
+            deleted["batch_state"] = True
+
+        # 5. Delete exports directory contents
+        exports_dir = Path("exports")
+        if exports_dir.exists():
+            for child in exports_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                elif child.is_file():
+                    child.unlink()
+
+        logger.info(f"Project deleted: {deleted}")
+        return {"status": "ok", "deleted": deleted}
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Project delete failed: {e}\n{traceback.format_exc()}")
+        return {"status": "error", "message": f"Delete failed: {e}"}
 
 
 # ── Match CRUD routes ──
@@ -255,93 +360,101 @@ async def start_capture(body: CaptureRequest):
     if active_pipeline and active_pipeline.status == "capturing":
         return {"status": "error", "message": "Capture already in progress"}
 
-    config = load_config()
+    try:
+        config = load_config()
 
-    match_data = dict(body.match_data) if body.match_data else {}
-    source_type = body.source_type or "footballia"
+        match_data = dict(body.match_data) if body.match_data else {}
+        source_type = body.source_type or "footballia"
 
-    # ── Create the appropriate source ──
-    if source_type == "footballia":
-        match_data["footballia_url"] = body.footballia_url
-        from backend.sources.footballia import FootballiaSource
-        source = FootballiaSource(config["browser"])
-        success = await source.setup(
-            url=body.footballia_url,
-            broadcast_fn=broadcast,
-        )
-        if not success:
-            return {"status": "error", "message": "Failed to connect to video. Check the URL and try again."}
+        # ── Create the appropriate source ──
+        if source_type == "footballia":
+            match_data["footballia_url"] = body.footballia_url
+            from backend.sources.footballia import FootballiaSource
+            source = FootballiaSource(config.get("browser", {}))
+            success = await source.setup(
+                url=body.footballia_url,
+                broadcast_fn=broadcast,
+            )
+            if not success:
+                return {"status": "error", "message": "Failed to connect to video. Check the URL and try again."}
 
-    elif source_type == "local_file":
-        try:
-            import cv2
-        except ImportError:
-            return {"status": "error", "message": "opencv-python not installed. Run: pip install opencv-python"}
-        from backend.sources.local_file import LocalFileSource
-        source = LocalFileSource(config)
-        success = await source.setup(filepath=body.local_filepath, broadcast_fn=broadcast)
-        if not success:
-            return {"status": "error", "message": "Failed to open video file"}
+        elif source_type == "local_file":
+            try:
+                import cv2
+            except ImportError:
+                return {"status": "error", "message": "opencv-python not installed. Run: pip install opencv-python"}
+            from backend.sources.local_file import LocalFileSource
+            source = LocalFileSource(config)
+            success = await source.setup(filepath=body.local_filepath, broadcast_fn=broadcast)
+            if not success:
+                return {"status": "error", "message": "Failed to open video file"}
 
-    elif source_type == "generic_web":
-        from backend.sources.generic_web import GenericWebSource
-        source = GenericWebSource(config.get("browser", {}))
-        success = await source.setup(url=body.generic_web_url, broadcast_fn=broadcast)
-        if not success:
-            return {"status": "error", "message": "Failed to launch browser"}
-        # For generic web, we return here and wait for user to confirm video is playing
-        # The source is stored but pipeline is NOT started yet
-        state_store["pending_source"] = source
-        state_store["pending_body"] = body
-        state_store["pending_config"] = config
-        return {"status": "waiting_for_video", "message": "Browser is open. Start the video, then click 'Video is playing'."}
+        elif source_type == "generic_web":
+            from backend.sources.generic_web import GenericWebSource
+            source = GenericWebSource(config.get("browser", {}))
+            success = await source.setup(url=body.generic_web_url, broadcast_fn=broadcast)
+            if not success:
+                return {"status": "error", "message": "Failed to launch browser"}
+            # For generic web, we return here and wait for user to confirm video is playing
+            # The source is stored but pipeline is NOT started yet
+            state_store["pending_source"] = source
+            state_store["pending_body"] = body
+            state_store["pending_config"] = config
+            return {"status": "waiting_for_video", "message": "Browser is open. Start the video, then click 'Video is playing'."}
 
-    else:
-        return {"status": "error", "message": f"Unknown source type: {source_type}"}
+        else:
+            return {"status": "error", "message": f"Unknown source type: {source_type}"}
 
-    # ── Store scraped data (Footballia only) ──
-    db = MatchDB()
-    if source_type == "footballia" and hasattr(source, 'match_data') and source.match_data.get("scrape_success"):
+        # ── Store scraped data (Footballia only) ──
+        db = MatchDB()
+        if source_type == "footballia" and hasattr(source, 'match_data') and source.match_data.get("scrape_success"):
+            if body.match_id:
+                try:
+                    db.update_match_scraped_data(body.match_id, source.match_data)
+                except Exception as e:
+                    logger.warning(f"Failed to store scraped data: {e}")
+
+        # ── Create capture record ──
+        capture_id = None
         if body.match_id:
             try:
-                db.update_match_scraped_data(body.match_id, source.match_data)
+                capture_id = db.create_capture(
+                    match_id=body.match_id,
+                    provider=body.provider,
+                    source_type=source_type,
+                    config={"targets": body.targets, "start_time": body.start_time, "capture_mode": body.capture_mode},
+                )
             except Exception as e:
-                logger.warning(f"Failed to store scraped data: {e}")
+                logger.warning(f"Failed to create capture record: {e}")
 
-    # ── Create capture record ──
-    capture_id = None
-    if body.match_id:
-        try:
-            capture_id = db.create_capture(
-                match_id=body.match_id,
-                provider=body.provider,
-                source_type=source_type,
-                config={"targets": body.targets, "start_time": body.start_time, "capture_mode": body.capture_mode},
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create capture record: {e}")
+        # ── Create and start pipeline ──
+        active_pipeline = Pipeline(
+            source=source,
+            match=match_data,
+            targets=body.targets,
+            start_time=body.start_time,
+            config=config,
+            broadcast_fn=broadcast,
+            capture_id=capture_id,
+            db=db,
+            provider=body.provider,
+            task_id=body.task_id,
+            capture_mode=body.capture_mode,
+            goal_times=body.goal_times,
+            goal_window=body.goal_window,
+            custom_ranges=body.custom_ranges,
+        )
 
-    # ── Create and start pipeline ──
-    active_pipeline = Pipeline(
-        source=source,
-        match=match_data,
-        targets=body.targets,
-        start_time=body.start_time,
-        config=config,
-        broadcast_fn=broadcast,
-        capture_id=capture_id,
-        db=db,
-        provider=body.provider,
-        task_id=body.task_id,
-        capture_mode=body.capture_mode,
-        goal_times=body.goal_times,
-        goal_window=body.goal_window,
-    )
+        pipeline_task = asyncio.create_task(active_pipeline.run())
+        logger.info(f"Capture started: provider={body.provider}, task={body.task_id}, mode={body.capture_mode}, source={source_type}")
 
-    pipeline_task = asyncio.create_task(active_pipeline.run())
-    logger.info(f"Capture started: provider={body.provider}, task={body.task_id}, mode={body.capture_mode}, source={source_type}")
+        return {"status": "started", "capture_id": capture_id}
 
-    return {"status": "started", "capture_id": capture_id}
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Capture start failed: {e}\n{tb}")
+        return {"status": "error", "message": f"Capture failed: {e}"}
 
 
 @app.post("/api/capture/confirm-video")
@@ -579,6 +692,402 @@ async def health_check():
         result["status"] = "ok"
 
     return result
+
+
+# ── Navigator routes ──
+
+@app.post("/api/navigator/scrape")
+async def scrape_person_page(body: dict):
+    """Scrape a Footballia coach/player page for match discovery."""
+    url = body.get("url", "")
+    if not url:
+        return {"error": "URL required"}
+
+    global navigator_instance
+    if navigator_instance is None:
+        navigator_instance = FootballiaNavigator()
+
+    # We need a Playwright page. Reuse the Footballia source's browser if available,
+    # or launch a temporary one.
+    from backend.sources.footballia import FootballiaSource
+    source = FootballiaSource({})
+    launched = await source.setup(url=url, broadcast_fn=broadcast, navigate_only=True)
+    if not launched:
+        return {"error": "Failed to open browser"}
+
+    data = await navigator_instance.scrape_person_page(source._page, url, broadcast_fn=broadcast)
+    # Don't close the browser — user might want to browse more
+    return data
+
+
+@app.post("/api/navigator/scrape-team")
+async def scrape_team_page(body: dict):
+    """Scrape a Footballia team page for match discovery."""
+    url = body.get("url", "")
+    if not url:
+        return {"error": "URL required"}
+
+    global navigator_instance
+    if navigator_instance is None:
+        navigator_instance = FootballiaNavigator()
+
+    from backend.sources.footballia import FootballiaSource
+    source = FootballiaSource({})
+    launched = await source.setup(url=url, broadcast_fn=broadcast, navigate_only=True)
+    if not launched:
+        return {"error": "Failed to open browser"}
+
+    data = await navigator_instance.scrape_team_page(source._page, url, broadcast_fn=broadcast)
+    return data
+
+
+@app.post("/api/navigator/filter")
+async def filter_navigator_matches(body: dict):
+    """Filter previously scraped navigator data."""
+    nav = FootballiaNavigator()
+    data = body.get("data", {})
+    matches = nav.filter_matches(
+        data,
+        club=body.get("club"),
+        season=body.get("season"),
+        competition=body.get("competition"),
+        role=body.get("role"),
+    )
+    return {"matches": matches, "count": len(matches)}
+
+
+@app.post("/api/navigator/add-to-library")
+async def add_navigator_matches(body: dict):
+    """Add selected matches from navigator to the Match Library."""
+    matches = body.get("matches", [])
+    db = MatchDB()
+    added = 0
+    match_ids = []
+    for m in matches:
+        # Determine opponent based on home/away
+        team_name = m.get("team_name", "")
+        opponent = ""
+        if m.get("home_away") == "H":
+            opponent = m.get("away_team", "")
+        elif m.get("home_away") == "A":
+            opponent = m.get("home_team", "")
+        else:
+            opponent = m.get("away_team") or m.get("home_team", "")
+
+        try:
+            mid = db.add_match(
+                match_day=0,
+                date=m.get("date", ""),
+                home_away=m.get("home_away", ""),
+                opponent=opponent,
+                score=m.get("score", ""),
+                footballia_url=m.get("full_url", ""),
+                team_name=team_name,
+                season=m.get("season", ""),
+                competition=m.get("competition", ""),
+            )
+            added += 1
+            match_ids.append(mid)
+        except Exception as e:
+            logger.warning(f"Failed to add match: {e}")
+    db.close()
+    return {"added": added, "match_ids": match_ids}
+
+
+# ── Batch capture routes ──
+
+@app.post("/api/batch/create")
+async def create_batch(body: dict):
+    """Create a new batch capture queue."""
+    global batch_manager
+    batch_manager = BatchManager(broadcast_fn=broadcast)
+
+    batch_id = batch_manager.create_batch(
+        matches=body.get("matches", []),
+        targets=body.get("targets", {}),
+        provider=body.get("provider", "openai"),
+        task_id=body.get("task_id", "camera_angle"),
+        capture_mode=body.get("capture_mode", "full_match"),
+        delay_between=body.get("delay_between", 30),
+    )
+    return {"batch_id": batch_id, "count": len(body.get("matches", []))}
+
+
+@app.post("/api/batch/start")
+async def start_batch():
+    """Start executing the batch queue."""
+    if not batch_manager:
+        return {"error": "No batch created"}
+
+    async def pipeline_factory(**kwargs):
+        """Create and run a Pipeline for one match in the batch."""
+        from backend.sources.footballia import FootballiaSource
+        config = load_config()
+        source = FootballiaSource(config.get("browser", {}))
+        success = await source.setup(url=kwargs["match_url"], broadcast_fn=broadcast)
+        if not success:
+            raise RuntimeError(f"Failed to load {kwargs['match_label']}")
+
+        db = MatchDB()
+        capture_id = db.create_capture(
+            match_id=kwargs.get("match_id"),
+            provider=kwargs["provider"],
+            source_type="footballia",
+            config={"targets": kwargs["targets"]},
+        )
+
+        pipeline = Pipeline(
+            source=source,
+            match={"opponent": kwargs["match_label"], "id": kwargs.get("match_id")},
+            targets=kwargs["targets"],
+            start_time="00:00",
+            config=config,
+            broadcast_fn=broadcast,
+            capture_id=capture_id,
+            db=db,
+            provider=kwargs["provider"],
+            task_id=kwargs["task_id"],
+            capture_mode=kwargs["capture_mode"],
+        )
+
+        await pipeline.run()
+
+        return {
+            "frames_captured": sum(pipeline.saved_counts.values()),
+            "api_cost": pipeline.classifier.get_cost(),
+        }
+
+    # Run batch in background task
+    asyncio.create_task(batch_manager.run(pipeline_factory))
+    return {"status": "started"}
+
+
+@app.post("/api/batch/pause")
+async def pause_batch():
+    if batch_manager:
+        batch_manager.pause()
+    return {"status": "paused"}
+
+
+@app.post("/api/batch/resume")
+async def resume_batch():
+    if batch_manager:
+        batch_manager.resume()
+    return {"status": "resumed"}
+
+
+@app.post("/api/batch/cancel")
+async def cancel_batch():
+    if batch_manager:
+        batch_manager.cancel()
+    return {"status": "cancelled"}
+
+
+@app.get("/api/batch/state")
+async def get_batch_state():
+    if batch_manager:
+        return batch_manager.get_state() or {"status": "none"}
+    return {"status": "none"}
+
+
+# ── Statistics route ──
+
+@app.get("/api/stats")
+async def get_season_stats():
+    """Get aggregate season statistics."""
+    agg = StatsAggregator()
+    stats = agg.get_season_stats()
+    feedback = agg.get_correction_feedback()
+    if feedback:
+        stats["annotation_feedback"] = feedback
+    agg.close()
+    return stats
+
+
+# ── Export routes ──
+
+@app.post("/api/export")
+async def export_dataset(body: dict):
+    """Export dataset in a standard format."""
+    fmt = body.get("format", "csv")  # coco, imagenet, csv, huggingface
+    output_path = body.get("output_path", f"exports/{fmt}_{int(time.time())}")
+    capture_ids = body.get("capture_ids")
+    match_ids = body.get("match_ids")
+
+    exp = DatasetExporter()
+    try:
+        if fmt == "coco":
+            path = exp.export_coco(output_path, capture_ids, match_ids)
+        elif fmt == "imagenet":
+            path = exp.export_imagenet(output_path, capture_ids, match_ids)
+        elif fmt == "csv":
+            if not output_path.endswith(".csv"):
+                output_path += "/frames.csv"
+            path = exp.export_csv(output_path, capture_ids, match_ids)
+        elif fmt == "huggingface":
+            path = exp.export_huggingface(output_path, capture_ids, match_ids)
+        else:
+            return {"error": f"Unknown format: {fmt}"}
+        return {"status": "ok", "path": path, "format": fmt}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        exp.close()
+
+
+# ── Collections routes ──
+
+@app.get("/api/collections")
+async def list_collections():
+    db = MatchDB()
+    result = db.get_collections()
+    db.close()
+    return result
+
+
+@app.post("/api/collections")
+async def create_collection(body: dict):
+    db = MatchDB()
+    cid = db.create_collection(body.get("name", ""), body.get("description", ""))
+    if body.get("match_ids"):
+        db.add_to_collection(cid, body["match_ids"])
+    db.close()
+    return {"id": cid}
+
+
+@app.post("/api/collections/{collection_id}/add")
+async def add_to_collection(collection_id: int, body: dict):
+    db = MatchDB()
+    db.add_to_collection(collection_id, body.get("match_ids", []))
+    db.close()
+    return {"status": "ok"}
+
+
+@app.get("/api/collections/{collection_id}/matches")
+async def get_collection_matches(collection_id: int):
+    db = MatchDB()
+    matches = db.get_collection_matches(collection_id)
+    db.close()
+    return matches
+
+
+# ── Gallery batch accept route ──
+
+@app.post("/api/gallery/batch-accept")
+async def batch_accept_frames(body: dict):
+    """Accept all unreviewed frames above a confidence threshold."""
+    capture_id = body.get("capture_id")
+    threshold = body.get("threshold", 0.85)
+
+    if not capture_id:
+        return {"error": "capture_id required"}
+
+    db = MatchDB()
+    accepted = db.batch_accept_frames(capture_id, threshold)
+    db.close()
+    return {"accepted": accepted}
+
+
+# ── Category samples route ──
+
+@app.get("/api/category-samples")
+async def get_category_samples():
+    """
+    Return one high-confidence sample image path per category.
+    Used for the reference image popup.
+    """
+    db = MatchDB()
+    samples = {}
+    categories = db.conn.execute(
+        "SELECT DISTINCT camera_type FROM frames WHERE confidence > 0.85"
+    ).fetchall()
+
+    for (cat,) in categories:
+        row = db.conn.execute(
+            "SELECT filepath FROM frames WHERE camera_type = ? AND confidence > 0.85 "
+            "ORDER BY confidence DESC LIMIT 1",
+            (cat,),
+        ).fetchone()
+        if row and Path(row[0]).exists():
+            # Return relative path from recordings/
+            fp = Path(row[0])
+            try:
+                rel = fp.relative_to(Path("recordings"))
+                samples[cat] = str(rel)
+            except ValueError:
+                pass
+
+    db.close()
+    return samples
+
+
+# ── Custom task save route ──
+
+@app.post("/api/tasks/test-prompt")
+async def test_custom_prompt(body: dict):
+    """
+    Test a custom prompt by running it against a sample frame.
+    Uses the most recent captured frame, or returns a mock result if none available.
+    """
+    prompt = body.get("prompt", "")
+    classification_field = body.get("classification_field", "result")
+    provider = body.get("provider", "openai")
+
+    if not prompt:
+        return {"error": "No prompt provided"}
+
+    # Find a recent frame to test with
+    db = MatchDB()
+    row = db.conn.execute(
+        "SELECT filepath FROM frames ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    db.close()
+
+    if row and Path(row[0]).exists():
+        frame_bytes = Path(row[0]).read_bytes()
+    else:
+        return {
+            "error": "No captured frames found to test with. "
+                     "Capture at least one frame first, then test your prompt.",
+        }
+
+    # Build a temporary task config for the classifier
+    task_config = {
+        "id": "_test",
+        "name": "Test",
+        "prompt": prompt,
+        "classification_field": classification_field,
+        "categories": body.get("categories", []),
+    }
+
+    try:
+        from backend.classifiers import create_classifier
+        config = load_config()
+        classifier = create_classifier(
+            provider=provider,
+            task=task_config,
+            config=config,
+        )
+        result = await classifier.classify_frame(frame_bytes)
+        return {
+            "status": "ok",
+            "classified_as": result.get("classified_as"),
+            "confidence": result.get("confidence"),
+            "raw_response": result.get("raw_response"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/tasks/custom")
+async def save_custom_task(body: dict):
+    """Save a user-created custom task template."""
+    tm = TaskManager()
+    errors = tm.validate_task(body)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+    path = tm.save_custom_task(body)
+    return {"status": "ok", "path": path}
 
 
 # ── WebSocket ──

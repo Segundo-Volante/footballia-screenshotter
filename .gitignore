@@ -1,6 +1,3 @@
-# Environment & secrets
-.env
-
 # Python
 __pycache__/
 *.py[cod]
@@ -8,15 +5,28 @@ __pycache__/
 dist/
 build/
 *.egg
+venv/
+.venv/
 
-# Browser profile (login sessions)
+# Environment
+.env
+
+# Data (user-specific)
+data/
+recordings/
+exports/
+logs/
+browser_profiles/
 .browser_profile/
 
-# Output data
-recordings/
-logs/*.log
+# Database
+*.db
+*.db-journal
 
-# OS files
+# Batch state
+data/batch_state.json
+
+# OS
 .DS_Store
 Thumbs.db
 
@@ -26,7 +36,8 @@ Thumbs.db
 *.swp
 *.swo
 
-# Virtual environment
-venv/
-.venv/
-env/
+# Claude
+.claude/
+
+# Docker
+docker-compose.override.yml

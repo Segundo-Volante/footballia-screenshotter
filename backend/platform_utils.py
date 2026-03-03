@@ -149,5 +149,5 @@ def get_platform_info() -> dict:
         "python": sys.version,
         "arch": platform.machine(),
         "drm_bypass_reliable": platform.system() in ("Windows", "Linux"),
-        "drm_bypass_warning": platform.system() == "Darwin",
+        "drm_bypass_warning": "macOS may have DRM issues with some Footballia videos. Use headful browser mode if playback fails." if platform.system() == "Darwin" else None,
     }

@@ -49,8 +49,15 @@ class FootballiaSource(VideoSource):
 
     # ── VideoSource interface ──
 
-    async def setup(self, broadcast_fn: Optional[Callable] = None, url: str = "") -> bool:
-        """Full setup sequence: launch → navigate → login → detect parts → find video → start playback."""
+    async def setup(self, broadcast_fn: Optional[Callable] = None, url: str = "", navigate_only: bool = False) -> bool:
+        """Full setup sequence: launch → navigate → login → detect parts → find video → start playback.
+
+        Args:
+            broadcast_fn: Status callback
+            url: Footballia match or person page URL
+            navigate_only: If True, just open the page without searching for video player.
+                           Used by the Navigator for scraping person pages.
+        """
         self._url = url
 
         # Launch browser
@@ -63,6 +70,10 @@ class FootballiaSource(VideoSource):
             await broadcast_fn({"type": "status", "status": "capturing", "message": "Navigating to match..."})
         if not await self._navigate(url):
             return False
+
+        if navigate_only:
+            # Don't search for JWPlayer, don't try to play video
+            return True
 
         # Handle login
         if await self._is_login_required():
@@ -293,6 +304,36 @@ class FootballiaSource(VideoSource):
 
     async def _launch(self):
         PROFILE_DIR.mkdir(exist_ok=True)
+
+        # Clean stale SingletonLock if the owning process is dead
+        lock_file = PROFILE_DIR / "SingletonLock"
+        if lock_file.exists() or lock_file.is_symlink():
+            try:
+                import os, signal
+                target = os.readlink(str(lock_file))
+                # Format: "hostname-pid"
+                pid_str = target.rsplit("-", 1)[-1]
+                pid = int(pid_str)
+                try:
+                    os.kill(pid, 0)  # Check if alive
+                    # Process exists — try to kill it gracefully
+                    logger.warning(f"Killing stale browser process {pid}")
+                    os.kill(pid, signal.SIGTERM)
+                    import time as _time
+                    _time.sleep(1)
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                except ProcessLookupError:
+                    pass  # Already dead
+                lock_file.unlink(missing_ok=True)
+                logger.info("Removed stale SingletonLock")
+            except Exception as e:
+                # If we can't parse it, just remove it
+                logger.warning(f"Removing unparseable SingletonLock: {e}")
+                lock_file.unlink(missing_ok=True)
+
         self._playwright = await async_playwright().start()
         self._context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE_DIR),

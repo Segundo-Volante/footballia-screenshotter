@@ -70,13 +70,26 @@ def parse_time(time_str: str) -> float:
 
 
 def get_active_categories(task: dict) -> list[str]:
-    """Extract category value list from a task template."""
-    return [c["value"] for c in task.get("categories", [])]
+    """Extract category value list from a task template.
+    Handles both plain string lists and dict lists with 'value' keys."""
+    cats = task.get("categories", [])
+    if not cats:
+        return []
+    if isinstance(cats[0], str):
+        return list(cats)
+    return [c["value"] for c in cats]
 
 
 def get_active_category_descriptions(task: dict) -> dict[str, str]:
-    """Extract {value: label} mapping from a task template."""
-    return {c["value"]: c.get("label", c["value"]) for c in task.get("categories", [])}
+    """Extract {value: label} mapping from a task template.
+    Handles both plain string lists and dict lists with 'value'/'label' keys."""
+    cats = task.get("categories", [])
+    if not cats:
+        return {}
+    if isinstance(cats[0], str):
+        descs = task.get("category_descriptions", {})
+        return {c: descs.get(c, c) for c in cats}
+    return {c["value"]: c.get("label", c["value"]) for c in cats}
 
 
 # Default categories — used when no task is loaded (backward compat)

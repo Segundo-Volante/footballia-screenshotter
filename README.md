@@ -1,258 +1,127 @@
 # Footballia Screenshotter
 
-Automated screenshot capture tool for football match broadcasts on [Footballia](https://footballia.eu). Captures frames at regular intervals, classifies each frame by camera angle using OpenAI's GPT-4o-mini vision API, and organizes them into labeled folders.
-
-Built for football analysts, scouts, and data teams who need categorized broadcast stills sorted by camera type (wide, medium, closeup, aerial, behind goal, etc.).
+Automated football broadcast frame capture and classification tool. Captures screenshots from match videos, classifies each frame by camera angle using AI, and produces organized datasets ready for annotation and ML training.
 
 ## Features
 
-- **Web UI** — Browser-based interface with match selector, target configuration, and live dashboard
-- **Auto camera classification** — GPT-4o-mini vision classifies each frame into 8 camera angle categories
-- **Real-time progress** — WebSocket-powered live dashboard with per-category progress bars, thumbnails, and activity log
-- **Pause / Resume / Stop** — Full playback control with timestamp tracking for resuming later
-- **Multi-part support** — Handles matches split into 2 video files (auto-detects part 2)
-- **Persistent login** — Browser profile is saved between runs so you only log in once
-- **Resume captures** — Existing screenshots are detected and targets adjusted automatically
-- **Organized output** — Screenshots sorted into folders by camera type, with `metadata.csv` and `summary.json`
+- **3 Video Sources**: Footballia (free archive), local video files (.mp4/.mkv), any streaming site
+- **3 Classification Modes**: OpenAI GPT-4o-mini, Google Gemini Flash, Manual
+- **4 Analysis Tasks**: Camera angle, tactical formation, match events, scene type — or create custom tasks
+- **Smart Capture**: Pre-filter saves 30-40% API costs, adaptive sampling, Goals Only mode, custom time ranges
+- **Gallery/Review UI**: Keyboard-driven manual classification and AI review with undo
+- **Footballia Integration**: Auto-scrapes lineups, goals, match data. Browse by coach/player/team.
+- **Annotation Tool Bridge**: Generates annotation_ready/ packages with metadata + roster CSVs
+- **Batch Capture**: Queue multiple matches for automated sequential processing
+- **Export**: COCO JSON, ImageNet, CSV, HuggingFace Datasets
+- **Project Management**: Create/delete projects with full data cleanup
+- **Progress Tracking**: Real-time WebSocket updates with progress bars during capture and navigation
 
-## Camera Angle Categories
+## Quick Start
 
-| Category | Description |
-|---|---|
-| `WIDE_CENTER` | Main broadcast camera, full pitch width, 8+ players |
-| `WIDE_LEFT` | Broadcast camera panned to follow play on the left |
-| `WIDE_RIGHT` | Broadcast camera panned to follow play on the right |
-| `MEDIUM` | Tighter zone shot, 3-7 players visible |
-| `CLOSEUP` | Tight on 1-2 people, faces, celebrations, reactions |
-| `BEHIND_GOAL` | Camera behind goal line looking down the pitch |
-| `AERIAL` | Spider cam, top-down overhead view |
-| `OTHER` | Crowd shots, scoreboards, graphics, replays, studio |
+```bash
+git clone https://github.com/Segundo-Volante/footballia-screenshotter.git
+cd footballia-screenshotter
 
-## Prerequisites
+# Install dependencies
+pip install -r requirements.txt
+playwright install chromium
 
-- **Python 3.11+**
-- **A Footballia account** (free) — [Sign up here](https://footballia.eu/users/sign_up)
-- **An OpenAI API key** with access to `gpt-4o-mini` — [Get one here](https://platform.openai.com/api-keys)
+# Set up API keys (optional — Manual mode works without keys)
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY and/or GEMINI_API_KEY
 
-## Installation
+# Start
+python main.py
+# Open http://localhost:8000
+```
 
-1. **Clone the repo**
+## Platform Compatibility
 
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/footballia-screenshotter.git
-   cd footballia-screenshotter
-   ```
+| Video Source        | Windows | macOS  | Linux |
+|---------------------|---------|--------|-------|
+| Footballia          | ✅      | ✅     | ✅    |
+| Local video files   | ✅      | ✅     | ✅    |
+| YouTube (free)      | ✅      | ✅     | ✅    |
+| ESPN+ (DRM)         | ✅      | ⚠️*    | ✅    |
+| Paramount+ (DRM)    | ✅      | ⚠️*    | ✅    |
 
-2. **Create a virtual environment** (recommended)
-
-   ```bash
-   python -m venv venv
-   source venv/bin/activate    # macOS / Linux
-   # venv\Scripts\activate     # Windows
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Install Playwright browsers**
-
-   ```bash
-   playwright install chromium
-   ```
-
-5. **Set up your API key**
-
-   Copy the example env file and add your OpenAI key:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Edit `.env` and replace the placeholder:
-
-   ```
-   OPENAI_API_KEY=sk-proj-your-actual-key-here
-   ```
+\* macOS: DRM platforms may produce black screenshots. Use local video files as an alternative.
 
 ## Usage
 
-### 1. Prepare your Excel data
+1. **First run**: Setup wizard asks for team name, season, competitions
+2. **Add matches**: Paste Footballia URLs via Quick Capture, browse the Match Library, or discover matches by coach/player/team
+3. **Configure**: Choose analysis task, AI provider, target counts per category, and capture mode (full match, goals only, or custom time ranges)
+4. **Capture**: Watch the dashboard as frames are captured, classified, and saved in real-time
+5. **Review**: Optionally review AI classifications in the Gallery view with keyboard shortcuts
+6. **Export**: Use the Statistics view to export datasets in standard ML formats (COCO, ImageNet, CSV, HuggingFace)
+7. **Delete project**: Use the "Delete Project" button on the home screen to wipe all data and start fresh
 
-Place your match data Excel file in the `data/` folder. The file must have a sheet named **"Match Data"** with these columns:
+## API Key Setup
 
-| Column | Description |
-|---|---|
-| `MD` | Matchday number (1-38) |
-| `Date` | Match date |
-| `H/A` | Home or Away |
-| `Opponent` | Opponent team name |
-| `Score` | Final score |
-| `Result` | W / D / L |
-| `Footballia URL` | Full URL to the match on footballia.eu |
-
-The `Footballia URL` column is created automatically if missing. Additional columns (Starting XI, Substitutes, Goal Scorers, etc.) are optional.
-
-To find Footballia URLs: go to [footballia.eu](https://footballia.eu), search for your team, and copy the match page URLs.
-
-### 2. Start the server
-
-```bash
-python main.py
-```
-
-Open **http://localhost:8000** in your browser.
-
-### 3. Select a match
-
-The match table shows all matches from your Excel file. Matches with a Footballia URL are clickable. Select one to proceed.
-
-### 4. Configure targets
-
-Set how many screenshots you want for each camera angle. The default targets are:
-
-- Wide Center: 50
-- Wide Left/Right: 20 each
-- Medium: 15
-- Closeup: 10
-- Behind Goal: 5
-- Aerial: 3
-
-You can also set a custom start time to skip ahead in the video.
-
-### 5. Start capture
-
-Click **Start Capture**. A Chromium browser window will open.
-
-**First time only:** Footballia requires a free account. When the browser opens:
-1. The app will detect the login wall and show "Login required" in the dashboard
-2. Log in manually in the Playwright browser window that opened
-3. The app auto-detects when you've logged in and proceeds
-
-Your login session is saved in `.browser_profile/` so you won't need to log in again on subsequent runs.
-
-### 6. Monitor progress
-
-The live dashboard shows:
-- Video playback position and duration
-- Per-category progress bars (captured vs target)
-- Thumbnail of the latest captured frame
-- Running API cost
-- Activity log
-
-Use **Pause** to save your position (the timestamp is shown so you can resume later) or **Stop** to end the capture.
-
-## Output Structure
-
-Each capture creates a folder under `recordings/`:
+The app supports OpenAI and Google Gemini for AI-powered classification. Add your keys to a `.env` file in the project root:
 
 ```
-recordings/
-  MD04_Athletic_Club_2024-08-31/
-    WIDE_CENTER/
-      frame_00045.30_wide_center_conf95.jpg
-      frame_00047.30_wide_center_conf95.jpg
-      ...
-    WIDE_LEFT/
-      ...
-    MEDIUM/
-      ...
-    CLOSEUP/
-      ...
-    metadata.csv
-    summary.json
+OPENAI_API_KEY=sk-your-key-here
+GEMINI_API_KEY=your-gemini-key-here
 ```
 
-- **`metadata.csv`** — Every saved frame with camera type, confidence, video time, player count, replay flag
-- **`summary.json`** — Capture stats including total frames, per-category counts, duration, API cost
-
-## Configuration
-
-All settings are in `config.yaml`:
-
-```yaml
-defaults:
-  targets:             # Default screenshot targets per camera type
-    WIDE_CENTER: 50
-    WIDE_LEFT: 20
-    WIDE_RIGHT: 20
-    MEDIUM: 15
-    CLOSEUP: 10
-    BEHIND_GOAL: 5
-    AERIAL: 3
-    OTHER: 0
-
-sampling:
-  interval_seconds: 2.0   # Seconds between screenshots
-
-browser:
-  headless: false          # Must be false (Footballia blocks headless)
-  viewport_width: 1280
-  viewport_height: 720
-  timeout_ms: 30000
-
-openai:
-  model: gpt-4o-mini       # Vision model for classification
-  detail: low              # Image detail level (low = cheaper)
-  max_concurrent: 3        # Parallel API calls
-  cost_per_frame: 0.00007  # Estimated cost per classification
-
-output:
-  base_dir: ./recordings
-  thumbnail_width: 320
-```
-
-### Cost estimate
-
-At `detail: low` with `gpt-4o-mini`, each frame classification costs ~$0.00007. A full match capture of 123 screenshots costs approximately **$0.01**.
+If no API key is configured, the UI will show instructions on where to add it. Manual classification mode works without any API keys.
 
 ## Project Structure
 
 ```
-footballia-screenshotter/
-  main.py                  # Entry point — starts the server
-  config.yaml              # All configurable settings
-  .env                     # OpenAI API key (not committed)
-  .env.example             # Template for .env
-  requirements.txt         # Python dependencies
-  backend/
-    server.py              # FastAPI app, REST + WebSocket endpoints
-    pipeline.py            # Orchestrates capture/classify/broadcast loops
-    browser_engine.py      # Playwright browser automation + JWPlayer handling
-    camera_classifier.py   # OpenAI GPT-4o-mini vision classification
-    excel_manager.py       # Excel file reader (openpyxl + pandas)
-    output_manager.py      # File I/O, folder creation, CSV/JSON output
-    utils.py               # Logging, config loading, constants
-  frontend/
-    index.html             # Single-page app with 3 views
-    style.css              # Dark theme UI
-    app.js                 # Frontend state, WebSocket, view switching
-  data/
-    *.xlsx                 # Your match data Excel file
-  recordings/              # Output folder (auto-created)
-  logs/                    # Application logs
+backend/
+  server.py              - FastAPI routes + WebSocket
+  pipeline.py            - Main capture orchestration
+  sources/               - Video source implementations (Footballia, local file, generic web)
+  classifiers/           - AI classification providers (OpenAI, Gemini, Manual)
+  pre_filter.py          - Local frame analysis (zero cost)
+  adaptive_sampler.py    - Dynamic capture intervals
+  annotation_bridge.py   - annotation_ready/ package generator
+  batch_manager.py       - Multi-match queue
+  footballia_navigator.py - Browse by coach/player/team
+  footballia_scraper.py  - Match page data extraction
+  stats_aggregator.py    - Season statistics
+  exporter.py            - Dataset export (COCO, ImageNet, CSV, HuggingFace)
+  project_config.py      - Project creation and deletion
+  match_db.py            - SQLite database for matches, captures, frames
+frontend/
+  index.html             - Single-page web UI
+  app.js                 - Frontend application logic
+  style.css              - Styles
+config/
+  project.json           - Team/season configuration (auto-generated)
+  tasks/                 - Analysis task templates (JSON)
+  config.yaml            - App settings (sampling, browser, AI models)
 ```
 
-## Troubleshooting
+## Running Tests
 
-**"Login required" keeps showing even after logging in**
-- Make sure you're logging in within the Playwright browser window (not your regular browser)
-- The app checks for a video player element to confirm login — wait a few seconds after submitting credentials
+```bash
+pip install pytest
+pytest tests/ -v
+```
 
-**Video found but screenshots are empty**
-- Footballia may have changed their player. Check `logs/footballia.log` for details
-- Try closing the browser profile: `rm -rf .browser_profile/` and restart
+## Docker
 
-**OpenAI API errors**
-- Verify your key: `curl -s http://localhost:8000/api/health`
-- Make sure your key has access to `gpt-4o-mini`
-- Check your OpenAI account has billing enabled
+```bash
+# Local file mode (works headless):
+docker-compose up
 
-**Port 8000 already in use**
-- Kill the old process: `lsof -ti:8000 | xargs kill -9`
-- Or change the port in `main.py`
+# Set API keys in .env or pass via environment:
+OPENAI_API_KEY=sk-... docker-compose up
+```
+
+> **Note**: Footballia mode requires a visible browser (non-headless). Docker works best for local video file processing.
+
+## Cost Estimate
+
+With GPT-4o-mini and pre-filter enabled:
+
+* ~$0.008 per match (~120 API calls after filtering)
+* ~$0.26 for an entire 34-match season
+* Manual mode: $0.00 (no API calls)
 
 ## License
 

@@ -24,6 +24,48 @@
     "AERIAL": "Spider cam or steep overhead — bird's eye formations view",
     "OTHER": "Crowd, scoreboard, graphics, tunnel, replay transitions, studio"
   },
+  "category_references": {
+    "WIDE_CENTER": {
+      "description": "Main broadcast camera — full pitch width visible, centered. 8+ players visible. This is the standard angle for 60-70% of any broadcast.",
+      "visual_cues": "Both goals visible or nearly so. Sideline advertising boards visible at bottom. Players appear small.",
+      "frequency": "Very common (40-50%)"
+    },
+    "WIDE_LEFT": {
+      "description": "Wide camera panning left — same height as center but following play toward the left side of the pitch.",
+      "visual_cues": "One goal may be visible while the other is off-screen. Camera is tracking ball movement.",
+      "frequency": "Common (10-15%)"
+    },
+    "WIDE_RIGHT": {
+      "description": "Wide camera panning right — mirror of WIDE_LEFT.",
+      "visual_cues": "Same as WIDE_LEFT but tracking rightward.",
+      "frequency": "Common (10-15%)"
+    },
+    "MEDIUM": {
+      "description": "Mid-range shot — 3-6 players visible, focus on a specific area of play (e.g. penalty box, free kick setup).",
+      "visual_cues": "Players are medium-sized. Pitch markings clearly visible. Often used during set pieces.",
+      "frequency": "Common (12-18%)"
+    },
+    "CLOSEUP": {
+      "description": "Close-up — 1-2 players fill the frame. Face, jersey number clearly visible.",
+      "visual_cues": "Individual features visible. Often shows reactions, celebrations, or player close-ups before/after play stops.",
+      "frequency": "Moderate (6-10%)"
+    },
+    "BEHIND_GOAL": {
+      "description": "Camera positioned behind/beside the goal — often used for penalties, free kicks near goal, or goal replays.",
+      "visual_cues": "Goal frame visible in foreground. Players approaching the goal. Net may be visible.",
+      "frequency": "Rare (2-4%)"
+    },
+    "AERIAL": {
+      "description": "Bird's-eye / spider-cam — camera positioned directly above the pitch or on cables above.",
+      "visual_cues": "Players seen from above. Pitch markings form clear geometric patterns. No horizon line.",
+      "frequency": "Rare (1-3%)"
+    },
+    "OTHER": {
+      "description": "Any angle that doesn't fit the above — studio shots, crowd shots, scoreboard graphics, replays with overlays.",
+      "visual_cues": "Non-pitch content. Graphics overlays. Studio setting. Crowd-only shots.",
+      "frequency": "Variable (3-5%)"
+    }
+  },
   "prompt": "Classify this football broadcast screenshot into ONE camera angle.\n\nCategories:\n- WIDE_CENTER: Main camera, central elevated position, 8+ players visible, full pitch width\n- WIDE_LEFT: Broadcast camera panned left, large pitch area visible\n- WIDE_RIGHT: Broadcast camera panned right, large pitch area visible\n- MEDIUM: Tighter shot, 3-7 players, focused on ball area\n- CLOSEUP: Tight on 1-2 people, face/celebration/injury, minimal pitch visible\n- BEHIND_GOAL: Camera behind goal line looking down the pitch, goal posts often visible\n- AERIAL: Top-down or steep overhead, spider cam, bird's eye view of formations\n- OTHER: Crowd, scoreboard, graphics, tunnel, replay transition, studio\n\nThink step by step:\n1. How many players are visible?\n2. How much of the pitch is shown (estimate percentage)?\n3. What is the camera height and angle?\n4. Are there any non-game elements (graphics, replays, studio)?\n\nRespond with JSON only:\n{\"camera_type\": \"WIDE_CENTER\", \"confidence\": 0.95, \"reasoning\": \"brief explanation\", \"players_visible\": 18, \"pitch_visible_pct\": 80, \"is_replay\": false}",
   "extra_fields": ["players_visible", "pitch_visible_pct", "is_replay", "reasoning"],
   "suggested_targets": {
@@ -34,7 +76,7 @@
     "CLOSEUP": 10,
     "BEHIND_GOAL": 5,
     "AERIAL": 5,
-    "OTHER": 0
+    "OTHER": 2
   },
   "presets": {
     "training_data": {
@@ -48,7 +90,7 @@
         "CLOSEUP": 5,
         "BEHIND_GOAL": 5,
         "AERIAL": 5,
-        "OTHER": 0
+        "OTHER": 2
       }
     },
     "tactical_analysis": {
@@ -59,10 +101,10 @@
         "WIDE_LEFT": 30,
         "WIDE_RIGHT": 30,
         "MEDIUM": 10,
-        "CLOSEUP": 0,
-        "BEHIND_GOAL": 0,
+        "CLOSEUP": 2,
+        "BEHIND_GOAL": 2,
         "AERIAL": 10,
-        "OTHER": 0
+        "OTHER": 2
       }
     },
     "quick_test": {
@@ -76,7 +118,7 @@
         "CLOSEUP": 2,
         "BEHIND_GOAL": 2,
         "AERIAL": 2,
-        "OTHER": 0
+        "OTHER": 1
       }
     }
   }

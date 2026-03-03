@@ -82,9 +82,26 @@
                     <span class="source-note" id="drm-note"></span>
                 </div>
             </div>
+            <div class="source-cards" style="margin-top:16px;">
+                <div class="source-card" onclick="showView('navigator')">
+                    <div class="source-icon">&#128100;</div>
+                    <div class="source-info">
+                        <h3>Browse by Coach / Player</h3>
+                        <p>Paste a Footballia person URL to discover matches</p>
+                    </div>
+                </div>
+                <div class="source-card" onclick="showView('stats')">
+                    <div class="source-icon">&#128202;</div>
+                    <div class="source-info">
+                        <h3>Statistics</h3>
+                        <p>Season stats, accuracy, export dataset</p>
+                    </div>
+                </div>
+            </div>
             <div class="home-footer">
                 <button class="btn-text" onclick="showAddMatchDialog()">+ Add Match</button>
                 <button class="btn-text" onclick="showImportDialog()">Import Excel</button>
+                <button class="btn-text btn-danger" onclick="deleteProject()">Delete Project</button>
             </div>
         </div>
 
@@ -92,6 +109,13 @@
         <div id="view-library" class="view">
             <button class="back-btn" onclick="showView('home')">&#8592; Back</button>
             <h2>Match Library</h2>
+            <div class="library-toolbar">
+                <select id="lib-collection-filter" onchange="filterByCollection()" style="display:none;">
+                    <option value="">All matches</option>
+                    <!-- Populated by JS -->
+                </select>
+                <button class="btn-text btn-sm" onclick="toggleCollectionFilter()">&#128193; Collections</button>
+            </div>
             <div class="search-bar">
                 <input type="text" id="match-search" placeholder="Search matches..." autocomplete="off" />
             </div>
@@ -99,19 +123,25 @@
                 <table class="match-table" id="match-table">
                     <thead>
                         <tr>
+                            <th style="width:30px"><input type="checkbox" id="lib-select-all"
+                                onchange="toggleSelectAllLibrary(this)" /></th>
                             <th class="col-md">MD</th>
                             <th>Date</th>
                             <th>H/A</th>
                             <th>Opponent</th>
                             <th class="col-score">Score</th>
-                            <th>Result</th>
-                            <th>URL</th>
+                            <th>Status</th>
                         </tr>
                     </thead>
                     <tbody id="match-tbody"></tbody>
                 </table>
             </div>
             <p class="hint">Click a match to configure capture. Click the URL column to add/edit a Footballia URL.</p>
+            <div id="lib-batch-bar" class="lib-batch-bar" style="display:none;">
+                <span id="lib-batch-count">0 selected</span>
+                <button class="btn-secondary" onclick="deselectAllLibrary()">Clear</button>
+                <button class="btn-primary" onclick="openBatchConfig()">&#128249; Batch Capture Selected &#8594;</button>
+            </div>
         </div>
 
         <!-- MODALS -->
@@ -245,11 +275,43 @@
                 <span class="config-lineup-info" id="config-lineup-info" style="display:none;"></span>
             </div>
 
+            <!-- Smart recommendations (shown when relevant) -->
+            <div id="smart-recommendations" style="display:none;"></div>
+
             <!-- Task selector -->
             <div class="section">
                 <h3>Classification Task</h3>
                 <p class="section-desc">What should the AI classify in each frame?</p>
                 <div class="task-cards" id="task-cards"></div>
+
+                <!-- Custom prompt editor (shown when "custom" task is selected) -->
+                <div id="custom-prompt-editor" class="custom-prompt-editor" style="display:none;">
+                    <div class="editor-field">
+                        <label>Task Name</label>
+                        <input type="text" id="custom-task-name" placeholder="My Custom Analysis" />
+                    </div>
+                    <div class="editor-field">
+                        <label>Prompt <span class="hint">(sent to the AI with each frame)</span></label>
+                        <textarea id="custom-prompt-text" rows="8"
+                                  placeholder="Analyze this football broadcast frame..."></textarea>
+                    </div>
+                    <div class="editor-row">
+                        <div class="editor-field">
+                            <label>Classification Field <span class="hint">(JSON key for the main category)</span></label>
+                            <input type="text" id="custom-class-field" placeholder="camera_type" />
+                        </div>
+                        <div class="editor-field">
+                            <label>Categories <span class="hint">(comma-separated)</span></label>
+                            <input type="text" id="custom-categories"
+                                   placeholder="CATEGORY_A, CATEGORY_B, OTHER" />
+                        </div>
+                    </div>
+                    <div class="editor-actions">
+                        <button class="btn-secondary" onclick="testCustomPrompt()">&#129514; Test Prompt</button>
+                        <button class="btn-primary" onclick="saveCustomTask()">&#128190; Save as Template</button>
+                    </div>
+                    <div id="custom-test-result" class="test-result" style="display:none;"></div>
+                </div>
             </div>
             <div class="divider"></div>
 
@@ -457,6 +519,16 @@
                 </div>
             </div>
 
+            <!-- Batch accept actions -->
+            <div class="gallery-batch-actions">
+                <button class="btn-secondary btn-sm" onclick="batchAcceptHighConfidence()">
+                    &#10003; Accept all &#8805;85%
+                </button>
+                <button class="btn-secondary btn-sm" onclick="batchAcceptAll()">
+                    &#10003; Accept all remaining
+                </button>
+            </div>
+
             <!-- Main gallery area -->
             <div class="gallery-main">
                 <!-- Large preview -->
@@ -498,6 +570,250 @@
             <!-- Category stats sidebar -->
             <div class="gallery-stats" id="gallery-stats">
                 <!-- Populated by JS — count per category -->
+            </div>
+
+            <!-- Keyboard shortcut reference — collapsed by default -->
+            <div class="shortcuts-reference">
+                <button class="shortcuts-toggle" onclick="toggleShortcuts()">&#9000;&#65039; Shortcuts</button>
+                <div id="shortcuts-card" class="shortcuts-card" style="display:none;">
+                    <div class="shortcut-row"><kbd>1</kbd>-<kbd>8</kbd> Classify as category 1-8</div>
+                    <div class="shortcut-row"><kbd>&#8592;</kbd> / <kbd>&#8594;</kbd> Previous / Next frame</div>
+                    <div class="shortcut-row"><kbd>Space</kbd> Accept current classification</div>
+                    <div class="shortcut-row"><kbd>Z</kbd> Undo last action</div>
+                    <div class="shortcut-row"><kbd>S</kbd> Skip frame</div>
+                    <div class="shortcut-row"><kbd>F</kbd> Flag for later review</div>
+                    <div class="shortcut-row"><kbd>?</kbd> Toggle this reference</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== VIEW 6: COACH/PLAYER NAVIGATOR ===== -->
+        <div id="view-navigator" class="view">
+            <button class="back-btn" onclick="showView('home')">&#8592; Home</button>
+
+            <h2>&#128100; Browse by Coach / Player / Team</h2>
+            <p class="section-desc">Paste a Footballia URL to discover matches.</p>
+
+            <div class="nav-mode-row">
+                <button class="nav-mode-btn active" id="nav-mode-person"
+                        onclick="setNavMode('person')">&#128100; Coach / Player</button>
+                <button class="nav-mode-btn" id="nav-mode-team"
+                        onclick="setNavMode('team')">&#127967; Team</button>
+            </div>
+
+            <div class="nav-input-row">
+                <input type="text" id="nav-url" class="input-large"
+                       placeholder="https://footballia.eu/players/giovanni-trapattoni" />
+                <button class="btn-primary" onclick="scrapeNavigator()">Search &#8594;</button>
+            </div>
+
+            <div id="nav-loading" class="nav-loading" style="display:none;">
+                <div class="nav-progress-container">
+                    <div class="nav-progress-bar" id="nav-progress-bar"></div>
+                </div>
+                <span id="nav-loading-text">Loading page...</span>
+            </div>
+
+            <!-- Results tree -->
+            <div id="nav-results" style="display:none;">
+                <div class="nav-person-header">
+                    <h3 id="nav-person-name"></h3>
+                    <span id="nav-person-info" class="text-secondary"></span>
+                </div>
+
+                <!-- Filters -->
+                <div class="nav-filters">
+                    <select id="nav-filter-club" onchange="filterNavigatorResults()">
+                        <option value="">All clubs</option>
+                    </select>
+                    <select id="nav-filter-season" onchange="filterNavigatorResults()">
+                        <option value="">All seasons</option>
+                    </select>
+                    <select id="nav-filter-comp" onchange="filterNavigatorResults()">
+                        <option value="">All competitions</option>
+                    </select>
+                </div>
+
+                <!-- Match tree -->
+                <div id="nav-tree" class="nav-tree">
+                    <!-- Populated by JS -->
+                </div>
+
+                <!-- Actions -->
+                <div class="nav-actions">
+                    <span id="nav-selected-count">0 selected</span>
+                    <button class="btn-secondary" onclick="addSelectedToLibrary()">
+                        &#128229; Add to Library
+                    </button>
+                    <button class="btn-primary" onclick="batchCaptureSelected()">
+                        &#128249; Batch Capture Selected &#8594;
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== VIEW 7: STATISTICS ===== -->
+        <div id="view-stats" class="view">
+            <button class="back-btn" onclick="showView('home')">&#8592; Home</button>
+
+            <h2>&#128202; Season Statistics</h2>
+
+            <div class="stats-grid">
+                <!-- Summary cards -->
+                <div class="stats-card">
+                    <div class="stats-card-value" id="stats-matches">0 / 0</div>
+                    <div class="stats-card-label">Matches captured</div>
+                </div>
+                <div class="stats-card">
+                    <div class="stats-card-value" id="stats-frames">0</div>
+                    <div class="stats-card-label">Total frames</div>
+                </div>
+                <div class="stats-card">
+                    <div class="stats-card-value" id="stats-cost">$0.00</div>
+                    <div class="stats-card-label">Total API cost</div>
+                </div>
+                <div class="stats-card">
+                    <div class="stats-card-value" id="stats-accuracy">&mdash;</div>
+                    <div class="stats-card-label">Classification accuracy</div>
+                </div>
+            </div>
+
+            <!-- Distribution chart -->
+            <div class="stats-section">
+                <h3>Camera Angle Distribution</h3>
+                <div id="stats-distribution" class="stats-bars">
+                    <!-- Populated by JS — horizontal bar chart -->
+                </div>
+            </div>
+
+            <!-- Per-match table -->
+            <div class="stats-section">
+                <h3>Per Match</h3>
+                <div class="stats-table-scroll">
+                    <table class="stats-table" id="stats-match-table">
+                        <thead>
+                            <tr>
+                                <th>MD</th>
+                                <th>Opponent</th>
+                                <th>Frames</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="stats-match-tbody">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Export section -->
+            <div class="stats-section">
+                <h3>Export Dataset</h3>
+                <p class="section-desc">Export your classified frames in standard ML formats.</p>
+                <div class="export-buttons">
+                    <button class="btn-secondary" onclick="exportDataset('coco')">&#128230; COCO JSON</button>
+                    <button class="btn-secondary" onclick="exportDataset('imagenet')">&#128193; ImageNet</button>
+                    <button class="btn-secondary" onclick="exportDataset('csv')">&#128202; CSV</button>
+                    <button class="btn-secondary" onclick="exportDataset('huggingface')">&#129303; HuggingFace</button>
+                </div>
+                <div id="export-status" class="export-status" style="display:none;"></div>
+            </div>
+        </div>
+
+        <!-- ===== VIEW 8: BATCH DASHBOARD ===== -->
+        <div id="view-batch" class="view">
+            <button class="back-btn" onclick="showView('home')">&#8592; Home</button>
+
+            <div class="batch-header">
+                <h2>&#128249; Batch Capture</h2>
+                <div class="batch-controls">
+                    <button class="btn-secondary" id="batch-pause-btn" onclick="toggleBatchPause()">&#9208; Pause</button>
+                    <button class="btn-danger" onclick="cancelBatch()">&#10005; Cancel</button>
+                </div>
+            </div>
+
+            <!-- Overall progress -->
+            <div class="batch-progress">
+                <span id="batch-progress-text">0 / 0 matches</span>
+                <div class="batch-progress-bar">
+                    <div class="batch-progress-fill" id="batch-progress-fill"></div>
+                </div>
+            </div>
+
+            <!-- Match queue -->
+            <div class="batch-queue" id="batch-queue">
+                <!-- Populated by JS -->
+            </div>
+
+            <!-- Current capture sub-dashboard -->
+            <div id="batch-current-dashboard" class="batch-sub-dashboard">
+                <div id="batch-live-stats" class="filter-stats"></div>
+                <div id="batch-activity-log" class="activity-log"></div>
+            </div>
+
+            <!-- Delay countdown -->
+            <div id="batch-delay" class="batch-delay" style="display:none;">
+                Waiting <span id="batch-delay-seconds">30</span>s before next match...
+            </div>
+        </div>
+
+        <!-- ===== BATCH CONFIG MODAL ===== -->
+        <div id="batch-config-modal" class="modal" style="display:none;">
+            <div class="modal-content modal-wide">
+                <h3>&#128249; Batch Capture Configuration</h3>
+                <p id="batch-config-summary" class="text-secondary"></p>
+
+                <div class="batch-config-grid">
+                    <div class="config-section">
+                        <label>Analysis Task</label>
+                        <select id="batch-task" onchange="onBatchTaskChange()"></select>
+                    </div>
+                    <div class="config-section">
+                        <label>Classification Provider</label>
+                        <select id="batch-provider">
+                            <option value="openai">OpenAI GPT-4o-mini</option>
+                            <option value="gemini">Google Gemini Flash</option>
+                            <option value="manual">Manual (no AI)</option>
+                        </select>
+                    </div>
+                    <div class="config-section">
+                        <label>Targets Preset</label>
+                        <select id="batch-preset" onchange="onBatchPresetChange()"></select>
+                    </div>
+                    <div class="config-section">
+                        <label>Delay between matches</label>
+                        <select id="batch-delay-select">
+                            <option value="15">15 seconds</option>
+                            <option value="30" selected>30 seconds (recommended for Footballia)</option>
+                            <option value="60">60 seconds</option>
+                            <option value="0">No delay (local files only)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="config-section">
+                    <label>Target Counts</label>
+                    <div id="batch-targets" class="target-grid"></div>
+                </div>
+
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="closeBatchConfig()">Cancel</button>
+                    <button class="btn-primary" onclick="startBatch()">Start Batch &#8594;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== CATEGORY REFERENCE POPUP ===== -->
+        <div id="category-ref-popup" class="category-ref-popup" style="display:none;">
+            <div class="ref-popup-content">
+                <button class="ref-popup-close" onclick="closeCategoryRef()">&#10005;</button>
+                <h4 id="ref-popup-title"></h4>
+                <div id="ref-popup-image" class="ref-popup-image">
+                    <!-- Auto-populated from captures, or placeholder SVG -->
+                </div>
+                <p id="ref-popup-desc" class="ref-popup-desc"></p>
+                <p id="ref-popup-cues" class="ref-popup-cues"></p>
+                <p id="ref-popup-freq" class="ref-popup-freq"></p>
             </div>
         </div>
 

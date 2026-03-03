@@ -35,8 +35,8 @@
   "suggested_targets": {
     "LIVE_ACTION": 40, "SET_PIECE": 15, "CELEBRATION": 5,
     "TACTICAL_VIEW": 20, "PLAYER_CLOSEUP": 10, "BENCH_CLOSEUP": 5,
-    "REFEREE": 3, "CROWD": 3, "REPLAY": 0, "GRAPHICS": 0,
-    "PRE_POST_MATCH": 0
+    "REFEREE": 3, "CROWD": 3, "REPLAY": 2, "GRAPHICS": 2,
+    "PRE_POST_MATCH": 1
   },
   "presets": {
     "balanced": {
@@ -45,8 +45,8 @@
       "targets": {
         "LIVE_ACTION": 40, "SET_PIECE": 15, "CELEBRATION": 5,
         "TACTICAL_VIEW": 20, "PLAYER_CLOSEUP": 10, "BENCH_CLOSEUP": 5,
-        "REFEREE": 3, "CROWD": 3, "REPLAY": 0, "GRAPHICS": 0,
-        "PRE_POST_MATCH": 0
+        "REFEREE": 3, "CROWD": 3, "REPLAY": 2, "GRAPHICS": 2,
+        "PRE_POST_MATCH": 1
       }
     },
     "quick_test": {
@@ -55,8 +55,8 @@
       "targets": {
         "LIVE_ACTION": 5, "SET_PIECE": 3, "CELEBRATION": 2,
         "TACTICAL_VIEW": 3, "PLAYER_CLOSEUP": 2, "BENCH_CLOSEUP": 1,
-        "REFEREE": 1, "CROWD": 1, "REPLAY": 0, "GRAPHICS": 0,
-        "PRE_POST_MATCH": 0
+        "REFEREE": 1, "CROWD": 1, "REPLAY": 1, "GRAPHICS": 1,
+        "PRE_POST_MATCH": 1
       }
     }
   }

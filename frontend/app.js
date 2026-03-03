@@ -37,6 +37,10 @@ const state = {
     selectedSourceType: 'footballia',
     platformInfo: null,
     annotationReadyPath: null,
+    // Part 5 additions
+    navigatorData: null,
+    batchPaused: false,
+    navMode: 'person',
 };
 
 // ===== VIEW SWITCHING =====
@@ -62,6 +66,15 @@ function showView(viewName) {
 
     if (viewName === 'config') {
         loadConfigView();
+    }
+
+    if (viewName === 'stats') {
+        loadStats();
+    }
+
+    if (viewName === 'batch') {
+        connectWebSocket(); // Reuse WebSocket for batch updates
+        loadBatchState();
     }
 
     // Clean up gallery keyboard listener when leaving
@@ -177,7 +190,96 @@ async function completeSetup() {
     }
 }
 
+// ===== DELETE PROJECT =====
+async function deleteProject() {
+    const projectName = state.project?.team_name || 'this project';
+
+    // Step 1: first confirmation
+    const confirmed = confirm(
+        `Are you sure you want to delete the project "${projectName}" and ALL captured screenshots?\n\nThis will permanently remove:\n• All matches in the library\n• All captured & classified frames\n• All exports\n• The project configuration\n\nThis cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    // Step 2: type project name to confirm
+    const typed = prompt(
+        `To confirm deletion, type the project name exactly: "${projectName}"`
+    );
+    if (typed === null) return; // cancelled
+    if (typed.trim() !== projectName) {
+        alert(`Project name didn't match. Deletion cancelled.\n\nYou typed: "${typed.trim()}"\nExpected: "${projectName}"`);
+        return;
+    }
+
+    // Execute deletion
+    try {
+        const res = await fetch('/api/project', {method: 'DELETE'});
+        const data = await res.json();
+
+        if (data.status === 'error') {
+            alert(data.message || 'Failed to delete project.');
+            return;
+        }
+
+        // Clear all local state
+        state.project = null;
+        state.matches = [];
+        state.cameraTypes = [];
+        state.cameraDescriptions = {};
+        state.defaultTargets = {};
+
+        // Reset setup form fields for fresh start
+        const setupTeam = document.getElementById('setup-team');
+        const setupSeason = document.getElementById('setup-season');
+        const setupComps = document.getElementById('setup-competitions');
+        const setupExcel = document.getElementById('setup-excel-path');
+        if (setupTeam) setupTeam.value = '';
+        if (setupSeason) setupSeason.value = '';
+        if (setupComps) setupComps.value = '';
+        if (setupExcel) setupExcel.value = '';
+
+        // Show setup view
+        showView('setup');
+    } catch (e) {
+        console.error('Delete project error:', e);
+        alert('Failed to delete project. Check console for details.');
+    }
+}
+
 // ===== MATCH LIBRARY =====
+// ===== COLLECTIONS =====
+function toggleCollectionFilter() {
+    const sel = document.getElementById('lib-collection-filter');
+    if (sel.style.display === 'none') {
+        loadCollections();
+        sel.style.display = '';
+    } else {
+        sel.style.display = 'none';
+    }
+}
+
+async function loadCollections() {
+    const collections = await fetch('/api/collections').then(r => r.json());
+    const sel = document.getElementById('lib-collection-filter');
+    // Keep first option ("All matches")
+    while (sel.options.length > 1) sel.remove(1);
+    collections.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = `${c.name} (${c.captured_count}/${c.match_count})`;
+        sel.appendChild(opt);
+    });
+}
+
+async function filterByCollection() {
+    const colId = document.getElementById('lib-collection-filter').value;
+    if (!colId) {
+        renderMatchTable(state.matches);
+        return;
+    }
+    const matches = await fetch(`/api/collections/${colId}/matches`).then(r => r.json());
+    renderMatchTable(matches);
+}
+
 async function loadMatches() {
     try {
         const matches = await fetch('/api/matches').then(r => r.json());
@@ -198,34 +300,62 @@ function renderMatchTable(matches) {
 
         if (hasUrl) {
             tr.className = 'clickable';
-            tr.onclick = (e) => {
-                if (e.target.closest('.url-cell')) return;
-                selectMatch(m);
-            };
         } else {
             tr.className = 'no-url-row';
-            tr.onclick = (e) => {
-                if (e.target.closest('.url-cell')) return;
-            };
         }
 
-        const resultClass = m.result ? `result-${m.result.charAt(0).toUpperCase()}` : '';
-        const urlCell = hasUrl
-            ? `<td class="url-cell" onclick="showUrlEdit(${m.id}, '${(m.footballia_url || '').replace(/'/g, "\\'")}')"><span class="url-yes">&#10003;</span></td>`
-            : `<td class="url-cell" onclick="showUrlEdit(${m.id}, '')"><span class="url-no">+ add</span></td>`;
+        const status = m.captured
+            ? `<span class="status-captured">\u2705 ${m.frame_count || ''} frames</span>`
+            : hasUrl
+                ? '<span class="status-ready">\uD83D\uDD17 Ready</span>'
+                : '<span class="status-empty">\u2B1C No URL</span>';
 
         tr.innerHTML = `
+            <td class="batch-select-cell">
+                <input type="checkbox" class="lib-batch-cb" data-match-id="${m.id}"
+                       onchange="updateLibrarySelection()" />
+            </td>
             <td class="col-md">${m.md || m.match_day || ''}</td>
             <td>${m.date || ''}</td>
             <td>${m.home_away || ''}</td>
-            <td>${m.opponent || ''}</td>
+            <td class="match-opponent-cell" onclick="selectMatch(${JSON.stringify(m).replace(/"/g, '&quot;')})">${m.opponent || ''}</td>
             <td class="col-score">${m.score || ''}</td>
-            <td class="${resultClass}">${m.result || ''}</td>
-            ${urlCell}
+            <td>${status}</td>
         `;
 
         tbody.appendChild(tr);
     });
+}
+
+function updateLibrarySelection() {
+    const checked = document.querySelectorAll('.lib-batch-cb:checked');
+    const bar = document.getElementById('lib-batch-bar');
+    const count = document.getElementById('lib-batch-count');
+
+    if (checked.length > 0) {
+        bar.style.display = '';
+        count.textContent = `${checked.length} selected`;
+    } else {
+        bar.style.display = 'none';
+    }
+}
+
+function toggleSelectAllLibrary(checkbox) {
+    const allCbs = document.querySelectorAll('.lib-batch-cb');
+    allCbs.forEach(cb => cb.checked = checkbox.checked);
+    updateLibrarySelection();
+}
+
+function deselectAllLibrary() {
+    document.querySelectorAll('.lib-batch-cb').forEach(cb => cb.checked = false);
+    document.getElementById('lib-select-all').checked = false;
+    updateLibrarySelection();
+}
+
+function getSelectedLibraryMatches() {
+    const checked = document.querySelectorAll('.lib-batch-cb:checked');
+    const ids = new Set(Array.from(checked).map(cb => parseInt(cb.dataset.matchId)));
+    return state.matches.filter(m => ids.has(m.id));
 }
 
 // Search filter
@@ -462,6 +592,7 @@ function selectMatch(match) {
     }
 
     showView('config');
+    showSmartRecommendations(match);
 }
 
 async function loadConfigView() {
@@ -499,7 +630,7 @@ function renderTaskCards() {
         card.className = `task-card${task.id === state.selectedTask ? ' selected' : ''}`;
         card.onclick = () => selectTask(task.id);
 
-        const catCount = task.category_count || 0;
+        const catCount = (task.categories && task.categories.length) || task.category_count || 0;
         card.innerHTML = `
             <div class="task-card-name">${task.name}</div>
             <div class="task-card-meta">${catCount} categories</div>
@@ -522,17 +653,23 @@ async function loadTaskDetails() {
         const task = await fetch(`/api/tasks/${state.selectedTask}`).then(r => r.json());
 
         // Update categories from task
-        state.cameraTypes = (task.categories || []).map(c => c.value);
+        // Categories can be plain strings or objects with .value
+        state.cameraTypes = (task.categories || []).map(c => typeof c === 'string' ? c : c.value);
         state.cameraDescriptions = {};
-        (task.categories || []).forEach(c => {
-            state.cameraDescriptions[c.value] = c.label || c.value;
+        const descMap = task.category_descriptions || {};
+        state.cameraTypes.forEach(cat => {
+            state.cameraDescriptions[cat] = descMap[cat] || cat;
         });
 
         // Set suggested targets as defaults
         state.defaultTargets = task.suggested_targets || {};
 
-        // Render presets
-        renderPresetBar(task.presets || []);
+        // Render presets — API returns object, convert to array
+        const presetsObj = task.presets || {};
+        const presetsArr = Array.isArray(presetsObj)
+            ? presetsObj
+            : Object.entries(presetsObj).map(([id, p]) => ({id, ...p}));
+        renderPresetBar(presetsArr);
         renderTargetInputs();
         updateSummary();
     } catch (e) {
@@ -588,7 +725,11 @@ async function selectPreset(preset) {
 
     // Re-render preset bar to update selection
     const taskRes = await fetch(`/api/tasks/${state.selectedTask}`).then(r => r.json());
-    renderPresetBar(taskRes.presets || []);
+    const presetsObj = taskRes.presets || {};
+    const presetsArr = Array.isArray(presetsObj)
+        ? presetsObj
+        : Object.entries(presetsObj).map(([id, p]) => ({id, ...p}));
+    renderPresetBar(presetsArr);
 }
 
 function renderProviderCards() {
@@ -609,10 +750,18 @@ function renderProviderCards() {
             : 'Free';
         const statusStr = isAvailable ? costStr : 'No API key';
 
+        let apiKeyHint = '';
+        if (!isAvailable && provider.id === 'openai') {
+            apiKeyHint = `<div class="provider-card-hint">Add <code>OPENAI_API_KEY</code> to your <code>.env</code> file</div>`;
+        } else if (!isAvailable && provider.id === 'gemini') {
+            apiKeyHint = `<div class="provider-card-hint">Add <code>GEMINI_API_KEY</code> to your <code>.env</code> file</div>`;
+        }
+
         card.innerHTML = `
             <div class="provider-card-name">${provider.name}</div>
             <div class="provider-card-desc">${provider.description}</div>
             <div class="provider-card-cost">${statusStr}</div>
+            ${apiKeyHint}
         `;
         container.appendChild(card);
     });
@@ -642,7 +791,7 @@ function renderTargetInputs() {
         row.className = 'target-row';
         row.innerHTML = `
             <div class="target-info">
-                <span class="target-name">${formatCategoryLabel(type)}</span>
+                <span class="target-name">${formatCategoryLabel(type)} <span class="ref-icon" onclick="showCategoryRef('${type}')">\u2139\uFE0F</span></span>
                 <span class="target-hint">${desc}</span>
             </div>
             <input type="number" class="target-input" data-type="${type}"
@@ -701,6 +850,7 @@ async function startCapture() {
         capture_mode: state.captureMode,
         goal_times: state.scrapedGoals,
         goal_window: parseInt(document.getElementById('goal-window')?.value || '30'),
+        custom_ranges: state.captureMode === 'custom_times' ? getCustomRanges() : [],
     };
 
     try {
@@ -822,6 +972,12 @@ function connectWebSocket() {
                 break;
             case 'error':
                 showError(msg.message);
+                break;
+            default:
+                // Handle batch messages
+                if (msg.type && msg.type.startsWith('batch_')) {
+                    handleBatchMessage(msg);
+                }
                 break;
         }
     };
@@ -1257,6 +1413,11 @@ function galleryKeyHandler(e) {
         undoLastClassification();
         return;
     }
+
+    if (e.key === '?') {
+        toggleShortcuts();
+        return;
+    }
 }
 
 async function undoLastClassification() {
@@ -1344,6 +1505,80 @@ async function batchAccept() {
         renderFilmstrip();
         updateGalleryStats();
     }
+}
+
+async function batchAcceptHighConfidence() {
+    const threshold = 0.85;
+    const captureId = state.galleryCaptureId;
+    if (!captureId) return;
+
+    const unreviewed = state.galleryFrames.filter(f => !f.is_reviewed);
+    const eligible = unreviewed.filter(f => f.confidence >= threshold);
+
+    if (eligible.length === 0) {
+        alert('No unreviewed frames above 85% confidence.');
+        return;
+    }
+
+    if (!confirm(`Accept ${eligible.length} frames with \u226585% confidence as correctly classified?`)) {
+        return;
+    }
+
+    const res = await fetch('/api/gallery/batch-accept', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            capture_id: captureId,
+            threshold: threshold,
+        }),
+    });
+    const data = await res.json();
+
+    // Update local state
+    eligible.forEach(f => f.is_reviewed = true);
+
+    // Update Gallery counter
+    updateGalleryProgress();
+
+    alert(`Accepted ${data.accepted} frames. ${state.galleryFrames.filter(f => !f.is_reviewed).length} remaining to review.`);
+}
+
+async function batchAcceptAll() {
+    const captureId = state.galleryCaptureId;
+    if (!captureId) return;
+
+    const unreviewed = state.galleryFrames.filter(f => !f.is_reviewed).length;
+    if (unreviewed === 0) return;
+
+    if (!confirm(`Accept all ${unreviewed} remaining frames as correctly classified?`)) return;
+
+    const res = await fetch('/api/gallery/batch-accept', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            capture_id: captureId,
+            threshold: 0.0,  // Accept everything
+        }),
+    });
+    const data = await res.json();
+
+    state.galleryFrames.forEach(f => f.is_reviewed = true);
+    updateGalleryProgress();
+    alert(`Accepted ${data.accepted} frames. Review complete.`);
+}
+
+function updateGalleryProgress() {
+    const total = state.galleryFrames.length;
+    const reviewed = state.galleryFrames.filter(f => f.is_reviewed).length;
+    const el = document.getElementById('gallery-progress-text');
+    if (el) el.textContent = `${reviewed} / ${total} reviewed`;
+    const fill = document.getElementById('gallery-progress-fill');
+    if (fill) fill.style.width = total > 0 ? `${(reviewed / total) * 100}%` : '0%';
+}
+
+function toggleShortcuts() {
+    const card = document.getElementById('shortcuts-card');
+    card.style.display = card.style.display === 'none' ? '' : 'none';
 }
 
 function updateConfidenceFilter(value) {
@@ -1582,6 +1817,872 @@ function cancelGenericWeb() {
     document.getElementById('waiting-video-modal').style.display = 'none';
     showView('home');
 }
+
+// ===== CUSTOM TIME RANGES =====
+
+function addCustomRange() {
+    const container = document.getElementById('custom-ranges');
+    const row = document.createElement('div');
+    row.className = 'custom-range-row';
+    row.innerHTML = `
+        <input type="text" placeholder="Start (MM:SS)" class="time-input custom-start" />
+        <span>to</span>
+        <input type="text" placeholder="End (MM:SS)" class="time-input custom-end" />
+        <button class="btn-icon" onclick="removeCustomRange(this)">✕</button>
+    `;
+    container.appendChild(row);
+}
+
+function removeCustomRange(btn) {
+    const row = btn.closest('.custom-range-row');
+    const container = document.getElementById('custom-ranges');
+    if (container.querySelectorAll('.custom-range-row').length > 1) {
+        row.remove();
+    } else {
+        row.querySelectorAll('input').forEach(inp => inp.value = '');
+    }
+}
+
+function getCustomRanges() {
+    const rows = document.querySelectorAll('.custom-range-row');
+    const ranges = [];
+    rows.forEach(row => {
+        const start = row.querySelector('.custom-start')?.value.trim();
+        const end = row.querySelector('.custom-end')?.value.trim();
+        if (start && end) {
+            ranges.push({ start, end });
+        }
+    });
+    return ranges;
+}
+
+// ===== CUSTOM PROMPT EDITOR =====
+
+async function testCustomPrompt() {
+    const prompt = document.getElementById('custom-prompt-text').value;
+    const classField = document.getElementById('custom-class-field').value;
+    if (!prompt) { alert('Enter a prompt first'); return; }
+
+    document.getElementById('custom-test-result').style.display = '';
+    document.getElementById('custom-test-result').textContent = 'Testing...';
+
+    // Use a sample frame from the most recent capture (or a placeholder)
+    const res = await fetch('/api/tasks/test-prompt', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt, classification_field: classField}),
+    });
+    const data = await res.json();
+    document.getElementById('custom-test-result').textContent =
+        `Result: ${JSON.stringify(data, null, 2)}`;
+}
+
+async function saveCustomTask() {
+    const name = document.getElementById('custom-task-name').value.trim();
+    const prompt = document.getElementById('custom-prompt-text').value.trim();
+    const classField = document.getElementById('custom-class-field').value.trim();
+    const catsStr = document.getElementById('custom-categories').value.trim();
+
+    if (!name || !prompt || !classField || !catsStr) {
+        alert('Fill all fields');
+        return;
+    }
+
+    const categories = catsStr.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    const taskId = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+
+    const task = {
+        id: taskId,
+        name: name,
+        description: `Custom task: ${name}`,
+        classification_field: classField,
+        categories: categories,
+        prompt: prompt,
+        presets: [],
+    };
+
+    const res = await fetch('/api/tasks/custom', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(task),
+    });
+    const data = await res.json();
+    if (data.error) {
+        alert(`Error: ${data.error}`);
+    } else {
+        alert('Custom task saved! It will appear in the task selector.');
+        // Refresh tasks
+        state.tasks = await fetch('/api/tasks').then(r => r.json());
+        renderTaskCards();
+    }
+}
+
+// ===== COACH/PLAYER/TEAM NAVIGATOR =====
+
+function setNavMode(mode) {
+    state.navMode = mode;
+    document.getElementById('nav-mode-person').classList.toggle('active', mode === 'person');
+    document.getElementById('nav-mode-team').classList.toggle('active', mode === 'team');
+
+    const input = document.getElementById('nav-url');
+    input.placeholder = mode === 'person'
+        ? 'https://footballia.eu/players/giovanni-trapattoni'
+        : 'https://footballia.eu/teams/atletico-de-madrid';
+}
+
+async function scrapeNavigator() {
+    const url = document.getElementById('nav-url').value.trim();
+    if (!url) return;
+
+    document.getElementById('nav-loading').style.display = '';
+    document.getElementById('nav-results').style.display = 'none';
+    document.getElementById('nav-loading-text').textContent = 'Loading page...';
+    document.getElementById('nav-progress-bar').style.animation = '';
+    document.getElementById('nav-progress-bar').style.width = '';
+
+    // Listen for status updates via WebSocket
+    connectWebSocket();
+    const statusHandler = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'status' && msg.message) {
+            document.getElementById('nav-loading-text').textContent = msg.message;
+        }
+    };
+    if (state.ws) state.ws.addEventListener('message', statusHandler);
+
+    const endpoint = state.navMode === 'team'
+        ? '/api/navigator/scrape-team'
+        : '/api/navigator/scrape';
+
+    const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url}),
+    });
+    const data = await res.json();
+    state.navigatorData = data;
+
+    // Clean up status listener
+    if (state.ws) state.ws.removeEventListener('message', statusHandler);
+
+    // Complete the progress bar
+    const bar = document.getElementById('nav-progress-bar');
+    bar.style.animation = 'none';
+    bar.style.transform = 'none';
+    bar.style.width = '100%';
+
+    document.getElementById('nav-loading').style.display = 'none';
+
+    if (!data.scrape_success) {
+        alert('Failed to scrape page.');
+        return;
+    }
+
+    document.getElementById('nav-results').style.display = '';
+    document.getElementById('nav-person-name').textContent = data.name;
+    document.getElementById('nav-person-info').textContent =
+        `${data.type} \u00b7 ${data.total_matches} matches`;
+
+    if (state.navMode === 'team') {
+        renderTeamTree(data);
+    } else {
+        renderNavigatorTree(data);
+    }
+
+    populateNavigatorFilters(data);
+}
+
+async function scrapePersonPage() {
+    // Legacy — redirects to scrapeNavigator
+    state.navMode = 'person';
+    scrapeNavigator();
+}
+
+function populateSelect(id, options) {
+    const sel = document.getElementById(id);
+    const firstOption = sel.options[0].textContent;
+    sel.innerHTML = `<option value="">${firstOption}</option>`;
+    options.forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt;
+        o.textContent = opt;
+        sel.appendChild(o);
+    });
+}
+
+function renderNavigatorTree(data) {
+    const tree = document.getElementById('nav-tree');
+    tree.innerHTML = '';
+
+    for (const club of data.clubs) {
+        const clubDiv = document.createElement('div');
+        clubDiv.className = 'nav-club';
+
+        const header = document.createElement('div');
+        header.className = 'nav-club-header';
+        header.innerHTML = `<strong>\u{1F3DF} ${club.name}</strong> <span>(${club.match_count || '?'} matches, ${club.role})</span>`;
+        header.onclick = () => clubDiv.classList.toggle('collapsed');
+        clubDiv.appendChild(header);
+
+        for (const season of club.seasons) {
+            const seasonDiv = document.createElement('div');
+            seasonDiv.className = 'nav-season';
+            seasonDiv.innerHTML = `<div class="nav-season-header">${season.season} ${season.competition}</div>`;
+
+            for (const match of season.matches) {
+                const matchDiv = document.createElement('div');
+                matchDiv.className = 'nav-match';
+                matchDiv.innerHTML = `
+                    <label>
+                        <input type="checkbox" class="nav-match-cb" data-url="${match.full_url || ''}"
+                               data-home="${match.home_team}" data-away="${match.away_team}"
+                               data-date="${match.date}" data-season="${season.season}"
+                               data-comp="${season.competition}" data-stage="${match.stage}"
+                               onchange="updateNavSelection()" />
+                        ${match.date ? match.date + ' \u00b7 ' : ''}${match.home_team} vs ${match.away_team}
+                        ${match.stage ? `<span class="nav-stage">${match.stage}</span>` : ''}
+                    </label>
+                `;
+                seasonDiv.appendChild(matchDiv);
+            }
+            clubDiv.appendChild(seasonDiv);
+        }
+        tree.appendChild(clubDiv);
+    }
+}
+
+function renderTeamTree(data) {
+    const tree = document.getElementById('nav-tree');
+    tree.innerHTML = '';
+
+    for (const season of data.seasons) {
+        const seasonDiv = document.createElement('div');
+        seasonDiv.className = 'nav-club';  // Reuse club styling
+
+        const header = document.createElement('div');
+        header.className = 'nav-club-header';
+        const matchCount = season.competitions.reduce((sum, c) => sum + c.matches.length, 0);
+        header.innerHTML = `<strong>\uD83D\uDCC5 ${season.season}</strong> <span>(${matchCount} matches)</span>`;
+        header.onclick = () => seasonDiv.classList.toggle('collapsed');
+        seasonDiv.appendChild(header);
+
+        for (const comp of season.competitions) {
+            const compDiv = document.createElement('div');
+            compDiv.className = 'nav-season';
+            compDiv.innerHTML = `<div class="nav-season-header">\uD83C\uDFC6 ${comp.name} (${comp.matches.length})</div>`;
+
+            for (const match of comp.matches) {
+                const ha = match.home_away ? ` (${match.home_away})` : '';
+                const score = match.score ? ` ${match.score}` : '';
+                const opponent = match.home_away === 'H' ? match.away_team : match.home_team;
+
+                const matchDiv = document.createElement('div');
+                matchDiv.className = 'nav-match';
+                matchDiv.innerHTML = `
+                    <label>
+                        <input type="checkbox" class="nav-match-cb"
+                               data-url="${match.full_url || ''}"
+                               data-home="${match.home_team}" data-away="${match.away_team}"
+                               data-date="${match.date}" data-season="${season.season}"
+                               data-comp="${comp.name}" data-ha="${match.home_away}"
+                               data-score="${match.score || ''}"
+                               onchange="updateNavSelection()" />
+                        ${match.date ? match.date + ' \u00b7 ' : ''}${opponent}${ha}${score}
+                    </label>
+                `;
+                compDiv.appendChild(matchDiv);
+            }
+            seasonDiv.appendChild(compDiv);
+        }
+        tree.appendChild(seasonDiv);
+    }
+}
+
+function populateNavigatorFilters(data) {
+    if (state.navMode === 'team') {
+        const seasons = data.seasons.map(s => s.season);
+        const comps = [...new Set(data.seasons.flatMap(s => s.competitions.map(c => c.name)))];
+        populateSelect('nav-filter-season', seasons);
+        populateSelect('nav-filter-comp', comps);
+        // Hide club filter for team mode
+        document.getElementById('nav-filter-club').style.display = 'none';
+    } else {
+        const clubs = [...new Set(data.clubs.map(c => c.name))];
+        const seasons = [...new Set(data.clubs.flatMap(c => c.seasons.map(s => s.season)))];
+        const comps = [...new Set(data.clubs.flatMap(c => c.seasons.map(s => s.competition)).filter(Boolean))];
+        populateSelect('nav-filter-club', clubs);
+        populateSelect('nav-filter-season', seasons.sort());
+        populateSelect('nav-filter-comp', comps.sort());
+        document.getElementById('nav-filter-club').style.display = '';
+    }
+}
+
+function filterNavigatorResults() {
+    const club = document.getElementById('nav-filter-club').value;
+    const season = document.getElementById('nav-filter-season').value;
+    const comp = document.getElementById('nav-filter-comp').value;
+
+    if (!state.navigatorData) return;
+
+    // Show/hide matches based on filters
+    const allMatches = document.querySelectorAll('.nav-match');
+    allMatches.forEach(m => {
+        const cb = m.querySelector('.nav-match-cb');
+        if (!cb) return;
+        let show = true;
+        if (season && cb.dataset.season !== season) show = false;
+        if (comp && cb.dataset.comp !== comp) show = false;
+        m.style.display = show ? '' : 'none';
+    });
+
+    // Show/hide clubs
+    const allClubs = document.querySelectorAll('.nav-club');
+    allClubs.forEach(c => {
+        const header = c.querySelector('.nav-club-header strong');
+        if (!header) return;
+        if (club && !header.textContent.includes(club)) {
+            c.style.display = 'none';
+        } else {
+            c.style.display = '';
+        }
+    });
+}
+
+function updateNavSelection() {
+    const checked = document.querySelectorAll('.nav-match-cb:checked');
+    document.getElementById('nav-selected-count').textContent = `${checked.length} selected`;
+}
+
+function selectAllClub(clubName) {
+    document.querySelectorAll('.nav-match-cb').forEach(cb => {
+        const clubHeader = cb.closest('.nav-club')?.querySelector('.nav-club-header strong');
+        if (clubHeader && clubHeader.textContent.includes(clubName)) {
+            cb.checked = true;
+        }
+    });
+    updateNavSelection();
+}
+
+function deselectAll() {
+    document.querySelectorAll('.nav-match-cb').forEach(cb => cb.checked = false);
+    updateNavSelection();
+}
+
+async function addSelectedToLibrary() {
+    const checked = document.querySelectorAll('.nav-match-cb:checked');
+    if (checked.length === 0) {
+        alert('Select at least one match.');
+        return;
+    }
+    const teamName = state.navigatorData?.name || '';
+
+    const matches = Array.from(checked).map(cb => ({
+        home_team: cb.dataset.home,
+        away_team: cb.dataset.away,
+        date: cb.dataset.date,
+        full_url: cb.dataset.url,
+        season: cb.dataset.season,
+        competition: cb.dataset.comp,
+        home_away: cb.dataset.ha || '',
+        score: cb.dataset.score || '',
+        team_name: teamName,
+    }));
+
+    const res = await fetch('/api/navigator/add-to-library', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({matches}),
+    });
+    const data = await res.json();
+
+    // Auto-create a collection from navigator
+    if (data.added > 0 && state.navigatorData?.name) {
+        await fetch('/api/collections', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name: state.navigatorData.name,
+                description: `${data.added} matches from ${state.navMode} page`,
+                match_ids: data.match_ids || [],
+            }),
+        });
+    }
+
+    alert(`Added ${data.added} matches to your library.`);
+}
+
+function batchCaptureSelected() {
+    const checked = document.querySelectorAll('.nav-match-cb:checked');
+    if (checked.length === 0) {
+        alert('Select at least one match.');
+        return;
+    }
+    const matches = Array.from(checked).map(cb => ({
+        footballia_url: cb.dataset.url,
+        opponent: cb.dataset.away || cb.dataset.home,
+        date: cb.dataset.date,
+        season: cb.dataset.season,
+        competition: cb.dataset.comp,
+        home_away: '',
+        match_day: 0,
+    }));
+    state.batchMatches = matches;
+    _showBatchConfigModal(matches.length);
+}
+
+function openBatchConfig() {
+    const matches = getSelectedLibraryMatches();
+    if (matches.length === 0) {
+        alert('Select at least one match');
+        return;
+    }
+    state.batchMatches = matches;
+    _showBatchConfigModal(matches.length);
+}
+
+function _showBatchConfigModal(count) {
+    document.getElementById('batch-config-summary').textContent =
+        `${count} match${count > 1 ? 'es' : ''} selected`;
+
+    // Populate task dropdown
+    const taskSel = document.getElementById('batch-task');
+    taskSel.innerHTML = state.tasks.map(t =>
+        `<option value="${t.id}">${t.name}</option>`
+    ).join('');
+
+    onBatchTaskChange();
+    document.getElementById('batch-config-modal').style.display = 'flex';
+}
+
+function closeBatchConfig() {
+    document.getElementById('batch-config-modal').style.display = 'none';
+}
+
+function onBatchTaskChange() {
+    const taskId = document.getElementById('batch-task').value;
+    const task = state.tasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    // Populate preset dropdown
+    const presetSel = document.getElementById('batch-preset');
+    const presetEntries = Object.entries(task.presets || {});
+    presetSel.innerHTML = presetEntries.map(([pid, p]) =>
+        `<option value="${pid}">${p.name || pid}</option>`
+    ).join('');
+    if (presetEntries.length > 0) {
+        onBatchPresetChange();
+    }
+
+    // Populate target inputs
+    const targetsDiv = document.getElementById('batch-targets');
+    const cats = task.categories || [];
+    targetsDiv.innerHTML = cats.map(cat =>
+        `<div class="target-item">
+            <label>${cat.replace(/_/g, ' ')}</label>
+            <input type="number" class="batch-target-input" data-cat="${cat}"
+                   value="${state.defaultTargets[cat] || 10}" min="0" />
+        </div>`
+    ).join('');
+}
+
+function onBatchPresetChange() {
+    const taskId = document.getElementById('batch-task').value;
+    const presetId = document.getElementById('batch-preset').value;
+
+    fetch(`/api/tasks/${taskId}/presets/${presetId}`)
+        .then(r => r.json())
+        .then(data => {
+            const targets = data.targets || data;
+            if (targets) {
+                document.querySelectorAll('.batch-target-input').forEach(input => {
+                    const cat = input.dataset.cat;
+                    if (cat in targets) {
+                        input.value = targets[cat];
+                    }
+                });
+            }
+        });
+}
+
+async function startBatch() {
+    const matches = state.batchMatches;
+    if (!matches || matches.length === 0) return;
+
+    const taskId = document.getElementById('batch-task').value;
+    const provider = document.getElementById('batch-provider').value;
+    const delay = parseInt(document.getElementById('batch-delay-select').value);
+
+    // Collect targets
+    const targets = {};
+    document.querySelectorAll('.batch-target-input').forEach(input => {
+        targets[input.dataset.cat] = parseInt(input.value || '0');
+    });
+
+    closeBatchConfig();
+
+    // Create the batch
+    const createRes = await fetch('/api/batch/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            matches,
+            targets,
+            provider,
+            task_id: taskId,
+            capture_mode: 'full_match',
+            delay_between: delay,
+        }),
+    });
+    const createData = await createRes.json();
+    state.activeBatchId = createData.batch_id;
+
+    // Start it
+    await fetch('/api/batch/start', { method: 'POST' });
+
+    showView('batch');
+}
+
+// ===== STATISTICS =====
+
+async function loadStats() {
+    const stats = await fetch('/api/stats').then(r => r.json());
+
+    document.getElementById('stats-matches').textContent =
+        `${stats.matches.captured} / ${stats.matches.total}`;
+    document.getElementById('stats-frames').textContent =
+        stats.frames.total.toLocaleString();
+    document.getElementById('stats-cost').textContent =
+        `$${stats.cost.estimated_total.toFixed(2)}`;
+    document.getElementById('stats-accuracy').textContent =
+        stats.frames.reviewed > 0 ? `${stats.frames.accuracy_pct}%` : '\u2014';
+
+    // Distribution bars
+    const distEl = document.getElementById('stats-distribution');
+    const maxCount = Math.max(...Object.values(stats.distribution), 1);
+    distEl.innerHTML = Object.entries(stats.distribution)
+        .sort((a, b) => b[1] - a[1])
+        .map(([type, count]) => {
+            const pct = (count / maxCount * 100).toFixed(0);
+            const total_pct = stats.frames.total > 0 ? (count / stats.frames.total * 100).toFixed(1) : '0';
+            return `
+                <div class="dist-row">
+                    <span class="dist-label">${type.replace(/_/g, ' ')}</span>
+                    <div class="dist-bar-bg">
+                        <div class="dist-bar-fill" style="width:${pct}%"></div>
+                    </div>
+                    <span class="dist-count">${count} (${total_pct}%)</span>
+                </div>
+            `;
+        }).join('');
+
+    // Annotation feedback
+    if (stats.annotation_feedback) {
+        const fb = stats.annotation_feedback;
+        const feedbackDiv = document.createElement('div');
+        feedbackDiv.className = 'stats-section';
+        feedbackDiv.innerHTML = `
+            <h3>Annotation Tool Feedback</h3>
+            <p>${fb.total_frames_reviewed} frames reviewed in Annotation Tool.
+               ${fb.total_corrections} corrections (${fb.correction_rate_pct}% correction rate).</p>
+            ${fb.recommendation ? `<div class="recommendation warning"><p>${fb.recommendation}</p></div>` : ''}
+            ${fb.top_patterns.length > 0 ? `
+                <div class="correction-patterns">
+                    ${fb.top_patterns.map(p =>
+                        `<div class="correction-row">${p.from} → ${p.to}: ${p.count}×</div>`
+                    ).join('')}
+                </div>
+            ` : ''}
+        `;
+        document.getElementById('view-stats').appendChild(feedbackDiv);
+    }
+
+    // Per-match table
+    const tbody = document.getElementById('stats-match-tbody');
+    tbody.innerHTML = stats.per_match.map(m => {
+        const status = m.captured
+            ? `<span class="status-captured">\u2705 ${m.frame_count}</span>`
+            : '<span class="status-pending">\u2B1C</span>';
+        return `<tr>
+            <td>${m.match_day || ''}</td>
+            <td>${m.opponent || ''} ${m.home_away ? `(${m.home_away})` : ''}</td>
+            <td>${m.frame_count || ''}</td>
+            <td>${status}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function exportDataset(format) {
+    const statusEl = document.getElementById('export-status');
+    statusEl.style.display = '';
+    statusEl.textContent = `Exporting as ${format}...`;
+
+    const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({format}),
+    });
+    const data = await res.json();
+
+    if (data.error) {
+        statusEl.textContent = `Error: ${data.error}`;
+    } else {
+        statusEl.textContent = `\u2713 Exported to: ${data.path}`;
+    }
+}
+
+// ===== BATCH DASHBOARD =====
+
+async function loadBatchState() {
+    const res = await fetch('/api/batch/state').then(r => r.json());
+    if (res.status === 'none') return;
+
+    renderBatchQueue(res.items || []);
+    updateBatchProgress(res);
+}
+
+function renderBatchQueue(items) {
+    const queue = document.getElementById('batch-queue');
+    queue.innerHTML = items.map((item, i) => {
+        let icon = '\u23F3';
+        let cls = 'pending';
+        let detail = 'pending';
+        if (item.status === 'capturing') { icon = '\uD83D\uDD04'; cls = 'active'; detail = `${item.frames_captured} frames...`; }
+        if (item.status === 'completed') { icon = '\u2705'; cls = 'completed'; detail = `${item.frames_captured} frames`; }
+        if (item.status === 'failed') { icon = '\u274C'; cls = 'failed'; detail = item.error_message || 'failed'; }
+        if (item.status === 'skipped') { icon = '\u23ED'; cls = 'skipped'; detail = 'skipped'; }
+        return `<div class="batch-item ${cls}">${icon} ${item.match_label} \u2014 ${detail}</div>`;
+    }).join('');
+}
+
+function updateBatchProgress(batchState) {
+    if (!batchState || !batchState.items) return;
+    const total = batchState.total || batchState.items.length;
+    const completed = batchState.items.filter(i => i.status === 'completed' || i.status === 'failed' || i.status === 'skipped').length;
+    const pct = total > 0 ? (completed / total * 100).toFixed(0) : 0;
+
+    document.getElementById('batch-progress-text').textContent = `${completed} / ${total} matches`;
+    document.getElementById('batch-progress-fill').style.width = `${pct}%`;
+}
+
+function toggleBatchPause() {
+    state.batchPaused = !state.batchPaused;
+    const btn = document.getElementById('batch-pause-btn');
+    if (state.batchPaused) {
+        fetch('/api/batch/pause', {method: 'POST'});
+        btn.textContent = '\u25B6 Resume';
+    } else {
+        fetch('/api/batch/resume', {method: 'POST'});
+        btn.textContent = '\u23F8 Pause';
+    }
+}
+
+async function cancelBatch() {
+    if (!confirm('Cancel the batch capture? Completed matches will be kept.')) return;
+    await fetch('/api/batch/cancel', {method: 'POST'});
+    loadBatchState();
+}
+
+// Handle batch WebSocket messages
+function handleBatchMessage(msg) {
+    switch (msg.type) {
+        case 'batch_started':
+            state.batchTotal = msg.total;
+            state.batchCompleted = 0;
+            document.getElementById('batch-progress-text').textContent =
+                `0 / ${msg.total} matches`;
+            document.getElementById('batch-progress-fill').style.width = '0%';
+            break;
+
+        case 'batch_item_started':
+            state.batchCurrentIndex = msg.index;
+            refreshBatchQueue();
+            addToBatchLog(`\uD83D\uDD04 Starting: ${msg.match_label} (${msg.index + 1}/${msg.total})`);
+            break;
+
+        case 'batch_item_completed':
+            state.batchCompleted = (state.batchCompleted || 0) + 1;
+            const pct = Math.round((state.batchCompleted / state.batchTotal) * 100);
+            document.getElementById('batch-progress-text').textContent =
+                `${state.batchCompleted} / ${state.batchTotal} matches`;
+            document.getElementById('batch-progress-fill').style.width = pct + '%';
+            refreshBatchQueue();
+            const icon = msg.status === 'completed' ? '\u2705' : '\u274C';
+            addToBatchLog(
+                `${icon} ${msg.match_label} \u2014 ${msg.frames_captured} frames (${msg.status})`
+            );
+            break;
+
+        case 'batch_delay':
+            document.getElementById('batch-delay').style.display = '';
+            let countdown = msg.seconds;
+            document.getElementById('batch-delay-seconds').textContent = countdown;
+            state._batchDelayInterval = setInterval(() => {
+                countdown--;
+                document.getElementById('batch-delay-seconds').textContent = countdown;
+                if (countdown <= 0) {
+                    clearInterval(state._batchDelayInterval);
+                    document.getElementById('batch-delay').style.display = 'none';
+                }
+            }, 1000);
+            break;
+
+        case 'batch_completed':
+            document.getElementById('batch-progress-text').textContent =
+                `${msg.completed} / ${msg.total} matches completed`;
+            document.getElementById('batch-progress-fill').style.width = '100%';
+            addToBatchLog(
+                `\n\uD83D\uDCCA Batch complete: ${msg.completed} succeeded, ${msg.failed} failed. ` +
+                `${msg.total_frames} total frames. $${msg.total_cost.toFixed(3)} API cost.`
+            );
+            document.getElementById('batch-pause-btn').disabled = true;
+            break;
+    }
+}
+
+async function refreshBatchQueue() {
+    const res = await fetch('/api/batch/state');
+    const data = await res.json();
+    if (data.items) {
+        renderBatchQueue(data.items);
+    }
+}
+
+function addToBatchLog(message) {
+    const log = document.getElementById('batch-activity-log');
+    if (!log) return;
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.textContent = message;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+}
+
+// ===== SMART RECOMMENDATIONS =====
+
+function showSmartRecommendations(matchData) {
+    /**
+     * Show era-based prompt recommendations in the Config view.
+     * Inserted after the task selector section.
+     */
+    const container = document.getElementById('smart-recommendations');
+    if (!container) return;
+
+    const year = extractMatchYear(matchData);
+    if (!year) {
+        container.style.display = 'none';
+        return;
+    }
+
+    let html = '';
+
+    if (year < 1990) {
+        html = `
+            <div class="recommendation warning">
+                <strong>⚠️ Pre-1990 broadcast detected</strong>
+                <p>Older broadcasts typically use only 2-3 camera angles (wide and medium).
+                Consider using "Scene Type Classification" instead of "Camera Angle" for
+                better results. AERIAL and BEHIND_GOAL were extremely rare before the 1990s —
+                lower those targets to 1-2.</p>
+            </div>
+        `;
+    } else if (year < 2005) {
+        html = `
+            <div class="recommendation info">
+                <strong>💡 Standard-definition era (${year})</strong>
+                <p>Broadcasts from this era have moderate camera diversity. BEHIND_GOAL
+                and AERIAL angles appear occasionally. The default "Camera Angle" task is
+                suitable, but consider slightly lower targets for rare angles.</p>
+            </div>
+        `;
+    } else if (year >= 2015) {
+        html = `
+            <div class="recommendation success">
+                <strong>✓ Modern HD broadcast (${year})</strong>
+                <p>Rich camera diversity expected. Full "Camera Angle Classification" is ideal.
+                Consider also adding "Formation Detection" as a secondary analysis if you
+                need tactical data.</p>
+            </div>
+        `;
+    }
+    // Years 2005-2014: no recommendation (standard broadcast, no special advice)
+
+    if (html) {
+        container.innerHTML = html;
+        container.style.display = '';
+    } else {
+        container.style.display = 'none';
+    }
+}
+
+function extractMatchYear(matchData) {
+    /**
+     * Try to extract a year from match data (date, season, or folder name).
+     */
+    const date = matchData?.date || '';
+    const season = matchData?.season || '';
+
+    // Try date field: "2024-08-19" or "September 30, 1981"
+    let m = date.match(/(\d{4})/);
+    if (m) return parseInt(m[1]);
+
+    // Try season field: "1981-1982" or "2024-2025"
+    m = season.match(/(\d{4})/);
+    if (m) return parseInt(m[1]);
+
+    return null;
+}
+
+// ===== CATEGORY REFERENCE =====
+function showCategoryRef(category) {
+    /**
+     * Show a reference popup for a camera angle category.
+     * Uses task template data for description + auto-populated sample image if available.
+     */
+    const task = state.tasks.find(t => t.id === state.selectedTaskId) || state.tasks[0];
+    const refs = task?.category_references || {};
+    const ref = refs[category];
+
+    if (!ref) return;
+
+    document.getElementById('ref-popup-title').textContent = category.replace(/_/g, ' ');
+    document.getElementById('ref-popup-desc').textContent = ref.description;
+    document.getElementById('ref-popup-cues').textContent = `Visual cues: ${ref.visual_cues}`;
+    document.getElementById('ref-popup-freq').textContent = ref.frequency;
+
+    // Check if we have a sample image from past captures
+    const imageDiv = document.getElementById('ref-popup-image');
+    const samplePath = state.sampleImages?.[category];
+    if (samplePath) {
+        imageDiv.innerHTML = `<img src="/recordings/${samplePath}" alt="${category}" />`;
+    } else {
+        imageDiv.innerHTML = `<div class="ref-placeholder">${getCategoryEmoji(category)}</div>`;
+    }
+
+    document.getElementById('category-ref-popup').style.display = 'flex';
+}
+
+function closeCategoryRef() {
+    document.getElementById('category-ref-popup').style.display = 'none';
+}
+
+function getCategoryEmoji(cat) {
+    const map = {
+        'WIDE_CENTER': '\uD83D\uDCFA', 'WIDE_LEFT': '\u2B05\uFE0F\uD83D\uDCFA', 'WIDE_RIGHT': '\uD83D\uDCFA\u27A1\uFE0F',
+        'MEDIUM': '\uD83C\uDFA5', 'CLOSEUP': '\uD83D\uDD0D', 'BEHIND_GOAL': '\uD83E\uDD45',
+        'AERIAL': '\uD83E\uDD85', 'OTHER': '\uD83D\uDCF7',
+    };
+    return map[cat] || '\uD83D\uDCF7';
+}
+
+async function loadCategorySamples() {
+    try {
+        state.sampleImages = await fetch('/api/category-samples').then(r => r.json());
+    } catch {
+        state.sampleImages = {};
+    }
+}
+// Call this after first page load
+loadCategorySamples();
 
 // ===== HELPERS =====
 function formatTime(seconds) {

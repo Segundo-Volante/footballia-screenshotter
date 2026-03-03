@@ -11,14 +11,15 @@ TASKS_DIR = Path(__file__).parent.parent / "config" / "tasks"
 
 
 class TaskManager:
-    def __init__(self):
+    def __init__(self, tasks_dir: str = None):
+        self._tasks_dir = Path(tasks_dir) if tasks_dir else TASKS_DIR
         self._tasks: dict[str, dict] = {}
         self._load_tasks()
 
     def _load_tasks(self):
         """Load all .json files from config/tasks/"""
-        TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        for f in sorted(TASKS_DIR.glob("*.json")):
+        self._tasks_dir.mkdir(parents=True, exist_ok=True)
+        for f in sorted(self._tasks_dir.glob("*.json")):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 task_id = data.get("id", f.stem)
@@ -80,7 +81,7 @@ class TaskManager:
         """Save a user-defined custom task. Returns the task id."""
         task_id = task_data.get("id", "custom_" + str(len(self._tasks)))
         task_data["id"] = task_id
-        filepath = TASKS_DIR / f"{task_id}.json"
+        filepath = self._tasks_dir / f"{task_id}.json"
         filepath.write_text(
             json.dumps(task_data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

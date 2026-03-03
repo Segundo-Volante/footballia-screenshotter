@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  screenshotter:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./recordings:/app/recordings
+      - ./config:/app/config
+      - ./exports:/app/exports
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    # For Footballia mode on Linux (requires display):
+    # Uncomment these lines and run with: xhost +local:docker
+    # environment:
+    #   - DISPLAY=${DISPLAY}
+    # volumes:
+    #   - /tmp/.X11-unix:/tmp/.X11-unix

@@ -50,8 +50,8 @@ class ConsistencyChecker:
         counts = Counter(previous_types)
         majority_type, majority_count = counts.most_common(1)[0]
 
-        # If the majority is strong (>= N-2 of previous frames) and new frame differs
-        threshold = max(2, len(previous_types) - 2)
+        # If the majority is strong (>= N-1 of previous frames) and new frame differs
+        threshold = max(3, len(previous_types) - 1)
         if classified_as != majority_type and majority_count >= threshold:
             self._anomaly_count += 1
             return {

@@ -50,6 +50,9 @@ class AdaptiveSampler:
         if not self.enabled:
             return self.base
 
+        if not pre_filter_result:
+            pre_filter_result = {}
+
         # ── Case 1: Scene change detected -> capture quickly ──
         if pre_filter_result.get("scene_change"):
             self._scene_change_cooldown = 3

@@ -1,16 +1,27 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-websockets>=12.0
+# Core
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+aiofiles>=23.0.0
+
+# Browser automation
 playwright>=1.40.0
-openai>=1.12.0
+
+# AI Providers
+openai>=1.6.0
+google-generativeai>=0.5.0
+
+# Data processing
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Video (optional — only for Local File mode)
+opencv-python>=4.8.0
+
+# Legacy support (Excel import only, not required for new projects)
 openpyxl>=3.1.0
 pandas>=2.0.0
-Pillow>=10.0.0
-pyyaml>=6.0.0
-python-dotenv>=1.0.0
-tenacity>=8.2.0
-aiofiles>=23.0.0
-google-generativeai>=0.5.0
-numpy>=1.24.0
-pydantic>=2.0.0
-opencv-python>=4.8.0
+
+# Testing (dev only)
+# pip install pytest pytest-asyncio

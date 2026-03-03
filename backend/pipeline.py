@@ -41,6 +41,7 @@ class Pipeline:
         goal_times: list[dict] = None,
         goal_window: int = 30,
         db: Optional["MatchDB"] = None,
+        custom_ranges: list[dict] = None,
     ):
         self.source = source
         self.match = match
@@ -75,26 +76,40 @@ class Pipeline:
                     merged.append((start, end))
             self._goal_ranges = merged
 
+        # Pre-compute custom time ranges if in custom_times mode
+        self._custom_ranges: list[tuple[float, float]] = []
+        if capture_mode == "custom_times":
+            raw_ranges = custom_ranges or []
+            for r in raw_ranges:
+                start = parse_time(r.get("start", "0:00"))
+                end = parse_time(r.get("end", "0:00"))
+                if end > start:
+                    self._custom_ranges.append((start, end))
+            # Sort by start time
+            self._custom_ranges.sort(key=lambda x: x[0])
+
         # Load task template
         tm = TaskManager()
         self.task = tm.get_task(task_id)
         self.categories = get_active_categories(self.task)
 
-        # Create classifier
-        classifier_config = dict(config)
-        classifier_config["openai_api_key"] = config.get("openai", {}).get("api_key", "")
-        classifier_config["gemini_api_key"] = config.get("gemini", {}).get("api_key", "")
-        # Also pull from env if not in config
+        # Create classifier — pass keys the classifier expects: api_key, model, etc.
         from backend.utils import get_openai_key, get_gemini_key
-        if not classifier_config["openai_api_key"]:
-            classifier_config["openai_api_key"] = get_openai_key()
-        if not classifier_config["gemini_api_key"]:
-            classifier_config["gemini_api_key"] = get_gemini_key()
-        # Pass model settings
-        classifier_config["openai_model"] = config.get("openai", {}).get("model", "gpt-4o-mini")
-        classifier_config["openai_detail"] = config.get("openai", {}).get("detail", "low")
-        classifier_config["gemini_model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
-        classifier_config["gemini_free_tier"] = config.get("gemini", {}).get("free_tier", True)
+        classifier_config = dict(config)
+
+        # The classifiers look for "api_key" and "model" directly
+        api_key = config.get("openai", {}).get("api_key", "") or get_openai_key()
+        gemini_key = config.get("gemini", {}).get("api_key", "") or get_gemini_key()
+
+        if provider == "openai":
+            classifier_config["api_key"] = api_key
+            classifier_config["model"] = config.get("openai", {}).get("model", "gpt-4o-mini")
+            classifier_config["detail"] = config.get("openai", {}).get("detail", "low")
+            classifier_config["max_concurrent"] = config.get("openai", {}).get("max_concurrent", 3)
+        elif provider == "gemini":
+            classifier_config["api_key"] = gemini_key
+            classifier_config["model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
+            classifier_config["free_tier"] = config.get("gemini", {}).get("free_tier", True)
 
         self.classifier = create_classifier(provider, self.task, classifier_config)
         self.output = OutputManager(match, config["output"]["base_dir"], categories=self.categories)
@@ -147,6 +162,44 @@ class Pipeline:
         self._last_classification = None
         self._last_pre_filter = None
 
+    @classmethod
+    def recover_from_crash(cls, capture_id: int, db: MatchDB, **pipeline_kwargs) -> Optional['Pipeline']:
+        """
+        Attempt to reconstruct a Pipeline from a crashed capture.
+
+        Reads the capture record and its frames from the database,
+        reconstructs saved_counts and last video time, and returns
+        a Pipeline ready to resume from where it left off.
+        """
+        capture = db.get_capture(capture_id)
+        if not capture:
+            return None
+
+        frames = db.get_capture_frames(capture_id)
+        if not frames:
+            return None
+
+        # Reconstruct saved counts
+        saved_counts = {}
+        max_time = 0.0
+        for f in frames:
+            cat = f.get("camera_type", "OTHER")
+            saved_counts[cat] = saved_counts.get(cat, 0) + 1
+            video_time = f.get("video_time", 0.0)
+            if video_time > max_time:
+                max_time = video_time
+
+        # Create pipeline with recovery state
+        pipeline = cls(
+            capture_id=capture_id,
+            db=db,
+            **pipeline_kwargs,
+        )
+        pipeline.saved_counts = saved_counts
+        pipeline._resume_from_time = max_time  # Resume after last captured frame
+
+        return pipeline
+
     def _targets_met(self) -> dict[str, bool]:
         """Return {category: True/False} where True means target is met."""
         return {
@@ -177,8 +230,28 @@ class Pipeline:
 
             await self.broadcast({"type": "status", "status": "capturing", "message": "Capturing frames..."})
 
+            # If resuming from crash, seek to last captured time
+            if hasattr(self, '_resume_from_time') and self._resume_from_time > 0:
+                resume_time = self._resume_from_time + self.interval
+                await self.broadcast({
+                    "type": "status",
+                    "message": f"Resuming from {self._format_time(resume_time)} "
+                               f"({sum(self.saved_counts.values())} frames already captured)",
+                })
+                if self.source.get_source_name() == "local_file":
+                    await self.source.seek_to(resume_time)
+                else:
+                    # For web sources, wait for video to reach resume_time
+                    # (user will need to manually seek the video)
+                    await self.broadcast({
+                        "type": "status",
+                        "message": f"Please seek the video to {self._format_time(resume_time)}",
+                    })
+
             if self.capture_mode == "goals_only" and self._goal_ranges:
                 await self._run_goals_only()
+            elif self.capture_mode == "custom_times" and self._custom_ranges:
+                await self._run_custom_times()
             else:
                 await asyncio.gather(
                     self._capture_loop(),
@@ -630,6 +703,118 @@ class Pipeline:
                 })
 
                 await asyncio.sleep(dense_interval)
+
+    async def _run_custom_times(self):
+        """
+        Capture frames within user-defined time ranges.
+        Each range is a tuple of (start_seconds, end_seconds).
+        Dense 1-second interval within each range (same as Goals Only).
+        """
+        await self.broadcast({
+            "type": "status",
+            "message": f"Custom Times mode: {len(self._custom_ranges)} time windows to capture",
+        })
+
+        for i, (range_start, range_end) in enumerate(self._custom_ranges):
+            if self.status != "capturing":
+                break
+
+            await self.broadcast({
+                "type": "status",
+                "message": f"Window {i + 1}/{len(self._custom_ranges)}: "
+                           f"{self._format_time(range_start)} → {self._format_time(range_end)}",
+            })
+
+            # Seek to window start
+            await self.source.seek_to(range_start)
+            await asyncio.sleep(0.5)
+
+            # Dense capture within window (1-second interval)
+            capture_time = range_start
+            while capture_time <= range_end and self.status == "capturing":
+                # Handle pause
+                if self.status == "paused":
+                    await self._pause_event.wait()
+                    if self.status != "capturing":
+                        break
+
+                is_local = self.source.get_source_name() == "local_file"
+                if is_local:
+                    await self.source.seek_to(capture_time)
+
+                frame_bytes = await self.source.capture_frame()
+                if frame_bytes is None:
+                    break
+
+                video_time = await self.source.get_current_time()
+
+                # Pre-filter
+                pf_result = self.pre_filter.analyze(frame_bytes)
+                if not pf_result["pass"]:
+                    capture_time += 1.0
+                    if not is_local:
+                        await asyncio.sleep(1.0)
+                    continue
+
+                # Classify
+                classification = await self.classifier.classify_frame(frame_bytes)
+
+                # Consistency check
+                consistency_result = {"anomaly": False}
+                if self.consistency:
+                    consistency_result = self.consistency.check(
+                        classification["classified_as"],
+                        pf_result.get("scene_change", False),
+                    )
+
+                # Save frame (save all passing frames regardless of targets in custom mode)
+                category = classification["classified_as"]
+                filepath = await self.output.save_frame(
+                    frame_bytes, video_time, classification, self.source.current_part,
+                )
+
+                # Record in database
+                if self.db and self.capture_id:
+                    try:
+                        self.db.record_frame(
+                            self.capture_id, filepath.name, str(filepath), video_time,
+                            self.source.current_part, classification,
+                        )
+                    except Exception:
+                        pass
+
+                # Update counts
+                self.saved_counts[category] = self.saved_counts.get(category, 0) + 1
+
+                thumbnail_b64 = self._make_thumbnail(frame_bytes)
+
+                # Broadcast
+                await self.broadcast({
+                    "type": "frame_classified",
+                    "filename": filepath.name,
+                    "classified_as": category,
+                    "confidence": classification.get("confidence", 0),
+                    "video_time": round(video_time, 1),
+                    "saved": True,
+                    "thumbnail_b64": thumbnail_b64,
+                    "saved_counts": dict(self.saved_counts),
+                    "window": i + 1,
+                    "total_windows": len(self._custom_ranges),
+                    "anomaly": consistency_result.get("anomaly", False),
+                    "api_cost": self.classifier.get_cost(),
+                    "provider": self.provider,
+                })
+
+                capture_time += 1.0
+                if not is_local:
+                    await asyncio.sleep(1.0)
+
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Format seconds as MM:SS."""
+        m = int(seconds) // 60
+        s = int(seconds) % 60
+        return f"{m}:{s:02d}"
 
     def _format_goal_time(self, seconds: float) -> str:
         m = int(seconds // 60)

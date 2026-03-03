@@ -52,6 +52,12 @@ class ProjectConfig:
             encoding="utf-8",
         )
 
+    def delete(self):
+        """Remove the project config file."""
+        if self._path.exists():
+            self._path.unlink()
+        self._data = None
+
     def to_dict(self) -> dict:
         if not self._data:
             return {"team_name": "My Team", "season": "", "competitions": [], "language": "en"}

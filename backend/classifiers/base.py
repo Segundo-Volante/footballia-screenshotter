@@ -21,7 +21,10 @@ class BaseClassifier(ABC):
         """
         self.task = task
         self.config = config
-        self.categories: list[str] = [c["value"] for c in task.get("categories", [])]
+        raw_cats = task.get("categories", [])
+        self.categories: list[str] = [
+            c if isinstance(c, str) else c["value"] for c in raw_cats
+        ]
         self.classification_field: str = task.get("classification_field", "camera_type")
         self.prompt: str = task.get("prompt", "")
         self._call_count = 0

@@ -48,8 +48,8 @@
     "INJURY": 2,
     "CARD_SHOWN": 3,
     "KICKOFF": 2,
-    "REPLAY": 0,
-    "NON_GAME": 0
+    "REPLAY": 2,
+    "NON_GAME": 1
   },
   "presets": {
     "set_pieces": {
@@ -58,8 +58,8 @@
       "targets": {
         "OPEN_PLAY": 10, "GOAL_CELEBRATION": 3, "FREE_KICK": 20,
         "CORNER": 20, "PENALTY": 5, "THROW_IN": 10, "GOAL_KICK": 10,
-        "SUBSTITUTION": 0, "INJURY": 0, "CARD_SHOWN": 0,
-        "KICKOFF": 0, "REPLAY": 0, "NON_GAME": 0
+        "SUBSTITUTION": 1, "INJURY": 1, "CARD_SHOWN": 1,
+        "KICKOFF": 1, "REPLAY": 1, "NON_GAME": 1
       }
     },
     "quick_test": {
@@ -69,7 +69,7 @@
         "OPEN_PLAY": 5, "GOAL_CELEBRATION": 2, "FREE_KICK": 3,
         "CORNER": 3, "PENALTY": 1, "THROW_IN": 2, "GOAL_KICK": 2,
         "SUBSTITUTION": 1, "INJURY": 1, "CARD_SHOWN": 1,
-        "KICKOFF": 1, "REPLAY": 0, "NON_GAME": 0
+        "KICKOFF": 1, "REPLAY": 1, "NON_GAME": 1
       }
     }
   }
