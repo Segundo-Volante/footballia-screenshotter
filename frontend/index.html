@@ -131,6 +131,7 @@
                             <th>Opponent</th>
                             <th class="col-score">Score</th>
                             <th>Status</th>
+                            <th style="width:40px"></th>
                         </tr>
                     </thead>
                     <tbody id="match-tbody"></tbody>
@@ -275,6 +276,21 @@
                 <span class="config-lineup-info" id="config-lineup-info" style="display:none;"></span>
             </div>
 
+            <!-- Match preview (scraped data) -->
+            <div id="match-preview" class="match-preview" style="display:none;">
+                <div id="preview-loading" class="preview-loading" style="display:none;">
+                    <span class="spinner"></span> Scraping match info from Footballia&hellip;
+                </div>
+                <div id="preview-content" style="display:none;">
+                    <div id="preview-teams" class="preview-teams"></div>
+                    <div id="preview-meta" class="preview-meta"></div>
+                    <div class="preview-details">
+                        <div id="preview-lineups" class="preview-lineups"></div>
+                        <div id="preview-goals" class="preview-goals"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Smart recommendations (shown when relevant) -->
             <div id="smart-recommendations" style="display:none;"></div>
 
@@ -320,6 +336,7 @@
                 <h3>AI Provider</h3>
                 <p class="section-desc">Choose which AI service classifies your frames.</p>
                 <div class="provider-cards" id="provider-cards"></div>
+                <div class="provider-test-status" id="provider-test-status" style="display:none;"></div>
             </div>
             <div class="divider"></div>
 
@@ -448,6 +465,21 @@
                         <p class="mono" id="latest-info">Waiting for first frame...</p>
                     </div>
                 </div>
+                <div class="api-health-section" id="api-health-section" style="display:none;">
+                    <h4>API Health <span class="api-health-dot" id="api-health-dot"></span></h4>
+                    <div class="api-health-summary" id="api-health-summary">
+                        <span class="api-health-stat">Calls: <span class="mono" id="ah-total-calls">0</span></span>
+                        <span class="api-health-stat">OK: <span class="mono api-health-ok" id="ah-successful">0</span></span>
+                        <span class="api-health-stat">Errors: <span class="mono api-health-err" id="ah-errors">0</span></span>
+                    </div>
+                    <div class="api-health-last" id="api-health-last">
+                        <span class="api-health-label">Last response:</span>
+                        <span class="mono" id="ah-last-response">Waiting...</span>
+                    </div>
+                    <div class="api-health-log" id="api-health-log">
+                        <!-- Per-frame API responses populated by JS -->
+                    </div>
+                </div>
                 <div class="activity-log-section">
                     <h4>Activity log</h4>
                     <div class="activity-log" id="activity-log"></div>
@@ -467,6 +499,19 @@
                     <div class="pause-actions">
                         <button class="btn-resume" onclick="sendAction('resume')">&#9654; Resume</button>
                         <button class="btn-stop-save" onclick="sendAction('stop')">&#9632; Stop &amp; Save</button>
+                    </div>
+                </div>
+            </div>
+            <div class="api-error-overlay" id="api-error-overlay">
+                <div class="api-error-card">
+                    <div class="api-error-icon">&#9888;</div>
+                    <h3>API Error — Capture Stopped</h3>
+                    <p class="api-error-detail" id="api-error-detail">
+                        Multiple consecutive API errors detected. Your API key may be invalid or the service is down.
+                    </p>
+                    <div class="api-error-stats" id="api-error-stats"></div>
+                    <div class="api-error-actions">
+                        <button class="btn-primary" onclick="showView('home')">Back to Home</button>
                     </div>
                 </div>
             </div>

@@ -275,12 +275,12 @@ class FootballiaNavigator:
         # Determine teams from link text or row text
         home_team = ""
         away_team = ""
-        # Link text is often "TeamA - TeamB" or just one team name
+        # Link text is often "TeamA - TeamB" or "TeamA vs. TeamB"
         if " - " in link_text:
             parts = link_text.split(" - ")
             home_team = parts[0].strip()
             away_team = parts[1].strip() if len(parts) > 1 else ""
-        elif " vs " in link_text.lower():
+        elif re.search(r'\bvs\.?\s', link_text, re.IGNORECASE):
             parts = re.split(r"\s+vs\.?\s+", link_text, flags=re.IGNORECASE)
             home_team = parts[0].strip()
             away_team = parts[1].strip() if len(parts) > 1 else ""
@@ -363,78 +363,194 @@ class FootballiaNavigator:
                 })
 
             # ── Team pages structure ──
-            # Footballia team pages show matches grouped by season, then competition.
-            # The structure varies, but typically:
-            #   <h3>2024-2025</h3>
-            #   <h4>La Liga</h4>
-            #   <table> match rows </table>
-            #   <h4>Champions League</h4>
-            #   <table> match rows </table>
-            #   <h3>2023-2024</h3>
-            #   ...
+            # Footballia team pages use a flat table with columns:
+            #   Playing date | Match (link with logos) | Competition | Stage | Season
+            # The Match cell contains: HomeTeam <img> <img> AwayTeam
+            # We use JS evaluation for reliable extraction since the Match cell
+            # has images between team names that break simple text parsing.
 
-            current_season = ""
-            current_competition = ""
             seasons: dict[str, dict[str, list]] = {}
 
-            # Walk all headings and tables in order
-            elements = await page.query_selector_all("h2, h3, h4, h5, table")
+            # ── Strategy 1: JS-based extraction from flat table ──
+            table_data = await page.evaluate("""() => {
+                const rows = document.querySelectorAll('table tr');
+                const results = [];
 
-            for el in elements:
-                tag = await el.evaluate("el => el.tagName.toLowerCase()")
-                text = (await el.inner_text()).strip()
+                for (const row of rows) {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length < 3) continue;
 
-                if tag in ("h2", "h3"):
-                    # Season header — e.g. "2024-2025"
-                    season_match = re.search(r"(\d{4}[-/]\d{2,4})", text)
-                    if season_match:
-                        current_season = season_match.group(1)
-                        if current_season not in seasons:
-                            seasons[current_season] = {}
-                        current_competition = ""
+                    const link = row.querySelector('a[href*="/matches/"]');
+                    if (!link) continue;
 
-                elif tag in ("h4", "h5"):
-                    # Competition header — e.g. "La Liga", "Champions League"
-                    current_competition = text.strip()
-                    if current_season and current_competition:
-                        if current_competition not in seasons.get(current_season, {}):
+                    // Find which cell contains the match link
+                    let matchCellIdx = -1;
+                    for (let i = 0; i < cells.length; i++) {
+                        if (cells[i].contains(link)) {
+                            matchCellIdx = i;
+                            break;
+                        }
+                    }
+                    if (matchCellIdx === -1) continue;
+
+                    // Extract team names from the link by splitting on <img> elements
+                    const textParts = [];
+                    let currentText = '';
+
+                    function walkNode(parent) {
+                        for (const node of parent.childNodes) {
+                            if (node.nodeType === 3) {
+                                currentText += node.textContent;
+                            } else if (node.nodeName === 'IMG') {
+                                const trimmed = currentText.trim();
+                                if (trimmed) {
+                                    textParts.push(trimmed);
+                                    currentText = '';
+                                }
+                            } else if (node.childNodes && node.childNodes.length > 0) {
+                                walkNode(node);
+                            } else {
+                                currentText += node.textContent || '';
+                            }
+                        }
+                    }
+                    walkNode(link);
+                    const trimmed = currentText.trim();
+                    if (trimmed) textParts.push(trimmed);
+
+                    // Filter out "vs" / "vs." separator text
+                    const cleanParts = textParts.filter(p => !/^vs\\.?$/i.test(p));
+
+                    let homeTeam = '', awayTeam = '';
+                    if (cleanParts.length >= 2) {
+                        homeTeam = cleanParts[0];
+                        awayTeam = cleanParts[cleanParts.length - 1];
+                    } else if (cleanParts.length === 1) {
+                        const text = cleanParts[0];
+                        const vsMatch = text.match(/(.+?)\\s+vs\\.?\\s+(.+)/i);
+                        const dashMatch = text.match(/(.+?)\\s+-\\s+(.+)/);
+                        if (vsMatch) {
+                            homeTeam = vsMatch[1].trim();
+                            awayTeam = vsMatch[2].trim();
+                        } else if (dashMatch) {
+                            homeTeam = dashMatch[1].trim();
+                            awayTeam = dashMatch[2].trim();
+                        } else {
+                            homeTeam = text;
+                        }
+                    }
+
+                    // Collect cells before and after the match cell
+                    const beforeMatch = [];
+                    const afterMatch = [];
+                    for (let i = 0; i < cells.length; i++) {
+                        if (i < matchCellIdx) {
+                            beforeMatch.push(cells[i].textContent.trim());
+                        } else if (i > matchCellIdx) {
+                            afterMatch.push(cells[i].textContent.trim());
+                        }
+                    }
+
+                    results.push({
+                        href: link.getAttribute('href') || '',
+                        home_team: homeTeam,
+                        away_team: awayTeam,
+                        date: beforeMatch[0] || '',
+                        competition: afterMatch[0] || '',
+                        stage: afterMatch[1] || '',
+                        season: afterMatch[2] || '',
+                    });
+                }
+
+                return results;
+            }""")
+
+            for entry in table_data:
+                href = entry.get("href", "")
+                if not href or "/matches/" not in href:
+                    continue
+
+                match_slug = href.split("/matches/")[-1] if "/matches/" in href else ""
+
+                # Determine home/away relative to this team
+                team_lower = result["name"].lower()
+                home_team = entry.get("home_team", "")
+                away_team = entry.get("away_team", "")
+                home_away = ""
+                if home_team.lower() in team_lower or team_lower in home_team.lower():
+                    home_away = "H"
+                elif away_team.lower() in team_lower or team_lower in away_team.lower():
+                    home_away = "A"
+
+                match_entry = {
+                    "date": entry.get("date", ""),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "stage": entry.get("stage", ""),
+                    "match_url": href if href.startswith("/") else f"/matches/{match_slug}",
+                    "full_url": f"https://footballia.eu{href}" if href.startswith("/") else href,
+                    "has_video": True,
+                    "home_away": home_away,
+                    "score": "",
+                }
+
+                target_season = entry.get("season", "") or "unknown"
+                target_comp = entry.get("competition", "") or "Unknown"
+                seasons.setdefault(target_season, {}).setdefault(target_comp, []).append(match_entry)
+
+            # ── Strategy 2: Fallback to heading-based grouping (older pages) ──
+            if not seasons:
+                current_season = ""
+                current_competition = ""
+                elements = await page.query_selector_all("h2, h3, h4, h5, table")
+
+                for el in elements:
+                    tag = await el.evaluate("el => el.tagName.toLowerCase()")
+                    text = (await el.inner_text()).strip()
+
+                    if tag in ("h2", "h3"):
+                        season_match = re.search(r"(\d{4}[-/]\d{2,4})", text)
+                        if season_match:
+                            current_season = season_match.group(1)
+                            if current_season not in seasons:
+                                seasons[current_season] = {}
+                            current_competition = ""
+
+                    elif tag in ("h4", "h5"):
+                        current_competition = text.strip()
+                        if current_season and current_competition:
                             seasons.setdefault(current_season, {})[current_competition] = []
 
-                elif tag == "table":
-                    # Match table
-                    links = await el.query_selector_all('a[href*="/matches/"]')
-                    for link in links:
-                        href = await link.get_attribute("href") or ""
-                        link_text = (await link.inner_text()).strip()
-                        parent = await link.evaluate_handle("el => el.closest('tr') || el.parentElement")
-                        row_text = ""
-                        if parent:
-                            try:
-                                row_text = await parent.inner_text()
-                            except Exception:
-                                pass
+                    elif tag == "table":
+                        links = await el.query_selector_all('a[href*="/matches/"]')
+                        for lnk in links:
+                            h = await lnk.get_attribute("href") or ""
+                            lt = (await lnk.inner_text()).strip()
+                            parent = await lnk.evaluate_handle("el => el.closest('tr') || el.parentElement")
+                            rt = ""
+                            if parent:
+                                try:
+                                    rt = await parent.inner_text()
+                                except Exception:
+                                    pass
 
-                        match_entry = self._parse_match_row(link_text, row_text, href)
-                        if match_entry:
-                            # Determine home/away relative to this team
-                            team_lower = result["name"].lower()
-                            if match_entry["home_team"].lower() in team_lower or \
-                               team_lower in match_entry["home_team"].lower():
-                                match_entry["home_away"] = "H"
-                            elif match_entry["away_team"].lower() in team_lower or \
-                                 team_lower in match_entry["away_team"].lower():
-                                match_entry["home_away"] = "A"
-                            else:
-                                match_entry["home_away"] = ""
+                            me = self._parse_match_row(lt, rt, h)
+                            if me:
+                                tl = result["name"].lower()
+                                if me["home_team"].lower() in tl or tl in me["home_team"].lower():
+                                    me["home_away"] = "H"
+                                elif me["away_team"].lower() in tl or tl in me["away_team"].lower():
+                                    me["home_away"] = "A"
+                                else:
+                                    me["home_away"] = ""
 
-                            # Extract score from row text if present
-                            score_match = re.search(r"(\d+)\s*[-–]\s*(\d+)", row_text)
-                            if score_match:
-                                match_entry["score"] = f"{score_match.group(1)}-{score_match.group(2)}"
+                                sm = re.search(r"(\d+)\s*[-–]\s*(\d+)", rt)
+                                if sm:
+                                    me["score"] = f"{sm.group(1)}-{sm.group(2)}"
 
-                            target_key = current_season or "unknown"
-                            target_comp = current_competition or "Unknown"
-                            seasons.setdefault(target_key, {}).setdefault(target_comp, []).append(match_entry)
+                                tk = current_season or "unknown"
+                                tc = current_competition or "Unknown"
+                                seasons.setdefault(tk, {}).setdefault(tc, []).append(me)
 
             # Convert to output format
             for season_key in sorted(seasons.keys(), reverse=True):

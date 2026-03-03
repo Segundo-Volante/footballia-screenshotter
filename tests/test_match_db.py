@@ -71,6 +71,85 @@ class TestMatchDB:
         accepted = mock_db.batch_accept_frames(cid, 0.75)
         assert accepted == 2  # frames with conf 0.8 and 0.9
 
+    def test_delete_match_cascades(self, mock_db):
+        """Deleting a match should cascade-delete captures and frames."""
+        mid = _add_test_match(mock_db, opponent="CascadeTest")
+        cid = mock_db.create_capture(mid, "openai", "footballia", {})
+        mock_db.record_frame(cid, "f1.jpg", "/tmp/f1.jpg", 10.0, 1,
+                             {"camera_type": "WIDE", "confidence": 0.9})
+        mock_db.record_frame(cid, "f2.jpg", "/tmp/f2.jpg", 20.0, 1,
+                             {"camera_type": "MEDIUM", "confidence": 0.8})
+
+        # Verify data exists before delete
+        assert len(mock_db.get_capture_frames(cid)) == 2
+        assert mock_db.get_match(mid) is not None
+
+        # Delete the match
+        mock_db.delete_match(mid)
+
+        # Verify match is gone
+        assert mock_db.get_match(mid) is None
+
+        # Verify captures are gone
+        cap = mock_db.conn.execute(
+            "SELECT * FROM captures WHERE id = ?", (cid,)
+        ).fetchone()
+        assert cap is None
+
+        # Verify frames are gone
+        assert len(mock_db.get_capture_frames(cid)) == 0
+
+    def test_delete_match_cleans_collections(self, mock_db):
+        """Deleting a match should remove it from collections."""
+        mid = _add_test_match(mock_db, opponent="CollectionTest")
+
+        # Create a collection and add the match
+        mock_db.conn.execute(
+            "INSERT INTO collections (name, description) VALUES (?, ?)",
+            ("Test Collection", "test")
+        )
+        col_id = mock_db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        mock_db.conn.execute(
+            "INSERT INTO collection_matches (collection_id, match_id) VALUES (?, ?)",
+            (col_id, mid)
+        )
+        mock_db.conn.commit()
+
+        # Verify association exists
+        assoc = mock_db.conn.execute(
+            "SELECT * FROM collection_matches WHERE match_id = ?", (mid,)
+        ).fetchone()
+        assert assoc is not None
+
+        # Delete the match
+        mock_db.delete_match(mid)
+
+        # Verify association is gone
+        assoc = mock_db.conn.execute(
+            "SELECT * FROM collection_matches WHERE match_id = ?", (mid,)
+        ).fetchone()
+        assert assoc is None
+
+    def test_delete_match_multiple_captures(self, mock_db):
+        """Deleting a match with multiple captures should clean all."""
+        mid = _add_test_match(mock_db, opponent="MultiCapture")
+        cid1 = mock_db.create_capture(mid, "openai", "footballia", {})
+        cid2 = mock_db.create_capture(mid, "gemini", "footballia", {})
+        mock_db.record_frame(cid1, "a.jpg", "/tmp/a.jpg", 5.0, 1,
+                             {"camera_type": "WIDE", "confidence": 0.9})
+        mock_db.record_frame(cid2, "b.jpg", "/tmp/b.jpg", 15.0, 1,
+                             {"camera_type": "CLOSE", "confidence": 0.85})
+
+        mock_db.delete_match(mid)
+
+        assert mock_db.get_match(mid) is None
+        assert len(mock_db.get_capture_frames(cid1)) == 0
+        assert len(mock_db.get_capture_frames(cid2)) == 0
+
+    def test_delete_nonexistent_match(self, mock_db):
+        """Deleting a match that doesn't exist should not error."""
+        mock_db.delete_match(99999)  # Should not raise
+
     def test_migration_is_safe(self, mock_db):
         """Calling _create_tables twice should not error."""
         mock_db._create_tables()

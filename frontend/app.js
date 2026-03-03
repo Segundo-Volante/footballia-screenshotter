@@ -321,10 +321,32 @@ function renderMatchTable(matches) {
             <td class="match-opponent-cell" onclick="selectMatch(${JSON.stringify(m).replace(/"/g, '&quot;')})">${m.opponent || ''}</td>
             <td class="col-score">${m.score || ''}</td>
             <td>${status}</td>
+            <td class="col-actions">
+                <button class="btn-delete-match" data-match-id="${m.id}" data-opponent="${(m.opponent || '').replace(/"/g, '&quot;')}" title="Delete match">&times;</button>
+            </td>
         `;
 
         tbody.appendChild(tr);
     });
+}
+
+async function deleteMatch(matchId, opponentName) {
+    const confirmed = confirm(`Delete match vs ${opponentName}?\n\nThis will also delete all captures, frames, and files for this match.`);
+    if (!confirmed) return;
+
+    try {
+        const res = await fetch(`/api/matches/${matchId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            state.matches = state.matches.filter(m => m.id !== matchId);
+            renderMatchTable(state.matches);
+        } else {
+            alert(data.message || 'Delete failed');
+        }
+    } catch (e) {
+        console.error('Delete match error:', e);
+        alert('Failed to delete match.');
+    }
 }
 
 function updateLibrarySelection() {
@@ -370,6 +392,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 String(m.md || m.match_day || '').includes(q)
             );
             renderMatchTable(filtered);
+        });
+    }
+
+    // Event delegation for delete buttons in match library
+    const matchTbody = document.getElementById('match-tbody');
+    if (matchTbody) {
+        matchTbody.addEventListener('click', (e) => {
+            const btn = e.target.closest('.btn-delete-match');
+            if (!btn) return;
+            e.stopPropagation();
+            const matchId = parseInt(btn.dataset.matchId);
+            const opponent = btn.dataset.opponent || '';
+            deleteMatch(matchId, opponent);
         });
     }
 
@@ -434,6 +469,122 @@ async function startQuickCapture() {
     document.getElementById('config-back-btn').onclick = () => showView('home');
 
     showView('config');
+
+    // Scrape match preview in background
+    scrapeMatchPreview(url);
+}
+
+async function scrapeMatchPreview(url) {
+    const previewEl = document.getElementById('match-preview');
+    const loadingEl = document.getElementById('preview-loading');
+    const contentEl = document.getElementById('preview-content');
+
+    // Show loading state
+    previewEl.style.display = '';
+    loadingEl.style.display = 'flex';
+    contentEl.style.display = 'none';
+
+    try {
+        const data = await fetch('/api/match/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+        }).then(r => r.json());
+
+        if (data.error) {
+            loadingEl.innerHTML = `<span style="color:var(--accent-red)">&#9888; ${data.error}</span>`;
+            return;
+        }
+
+        // Store scraped data for use in capture
+        state.previewData = data;
+        state.scrapedGoals = data.goals || [];
+
+        // Update the title with real team names
+        if (data.home_team && data.away_team) {
+            const title = `${data.home_team} vs ${data.away_team}`;
+            document.getElementById('config-match-title').textContent = title;
+            state.selectedMatch.opponent = data.away_team;
+        }
+        if (data.date) {
+            document.getElementById('config-match-date').textContent = data.date;
+        }
+
+        // Update goals badge for Goals Only mode
+        if (state.scrapedGoals.length > 0) {
+            const badge = document.getElementById('goals-badge');
+            badge.textContent = `${state.scrapedGoals.length} goals`;
+            badge.style.display = '';
+
+            document.getElementById('goals-list').innerHTML = state.scrapedGoals
+                .map(g => `<div class="goal-item">&#x26BD; ${g.minute}' ${g.scorer}${g.team !== 'unknown' ? ` (${g.team})` : ''}</div>`)
+                .join('');
+        }
+
+        renderMatchPreview(data);
+    } catch (e) {
+        loadingEl.innerHTML = `<span style="color:var(--text-tertiary)">Could not load match preview</span>`;
+        console.log('Preview scrape failed:', e);
+    }
+}
+
+function renderMatchPreview(data) {
+    const loadingEl = document.getElementById('preview-loading');
+    const contentEl = document.getElementById('preview-content');
+
+    loadingEl.style.display = 'none';
+    contentEl.style.display = '';
+
+    // Teams + result
+    const teamsEl = document.getElementById('preview-teams');
+    let teamsHtml = '';
+    if (data.home_team && data.away_team) {
+        const resultStr = data.result ? ` ${data.result.home} - ${data.result.away}` : '';
+        teamsHtml = `<span class="preview-home">${data.home_team}</span>${resultStr ? `<span class="preview-score">${resultStr}</span>` : ' vs '}<span class="preview-away">${data.away_team}</span>`;
+    }
+    teamsEl.innerHTML = teamsHtml;
+
+    // Meta (competition, season, venue)
+    const metaEl = document.getElementById('preview-meta');
+    const metaParts = [];
+    if (data.competition) metaParts.push(data.competition);
+    if (data.season) metaParts.push(data.season);
+    if (data.stage) metaParts.push(data.stage);
+    if (data.venue) metaParts.push(`&#127971; ${data.venue}`);
+    metaEl.innerHTML = metaParts.join(' &middot; ');
+
+    // Lineups
+    const lineupsEl = document.getElementById('preview-lineups');
+    const homeCount = (data.home_lineup || []).length;
+    const awayCount = (data.away_lineup || []).length;
+    if (homeCount > 0 || awayCount > 0) {
+        let html = `<div class="preview-section-title">&#128203; Lineups</div>`;
+        if (homeCount > 0) {
+            const coach = data.home_coach ? ` &middot; Coach: ${data.home_coach.name}` : '';
+            html += `<div class="preview-lineup-row"><strong>${data.home_team || 'Home'}</strong>: ${homeCount} players${coach}</div>`;
+            html += `<div class="preview-players">${data.home_lineup.map(p => p.name).join(', ')}</div>`;
+        }
+        if (awayCount > 0) {
+            const coach = data.away_coach ? ` &middot; Coach: ${data.away_coach.name}` : '';
+            html += `<div class="preview-lineup-row"><strong>${data.away_team || 'Away'}</strong>: ${awayCount} players${coach}</div>`;
+            html += `<div class="preview-players">${data.away_lineup.map(p => p.name).join(', ')}</div>`;
+        }
+        lineupsEl.innerHTML = html;
+    } else {
+        lineupsEl.innerHTML = '';
+    }
+
+    // Goals
+    const goalsEl = document.getElementById('preview-goals');
+    if (data.goals && data.goals.length > 0) {
+        let html = `<div class="preview-section-title">&#x26BD; Goals</div>`;
+        html += data.goals.map(g =>
+            `<div class="preview-goal">${g.minute}' ${g.scorer}${g.team !== 'unknown' ? ` (${g.team})` : ''}</div>`
+        ).join('');
+        goalsEl.innerHTML = html;
+    } else {
+        goalsEl.innerHTML = '';
+    }
 }
 
 // ===== URL EDITING =====
@@ -767,7 +918,7 @@ function renderProviderCards() {
     });
 }
 
-function selectProvider(providerId) {
+async function selectProvider(providerId) {
     state.selectedProvider = providerId;
     const provider = state.providers.find(p => p.id === providerId);
     if (provider) {
@@ -775,6 +926,42 @@ function selectProvider(providerId) {
     }
     renderProviderCards();
     updateSummary();
+
+    // Validate API key for AI providers
+    if (providerId !== 'manual') {
+        const statusEl = document.getElementById('provider-test-status');
+        statusEl.style.display = 'block';
+        statusEl.className = 'provider-test-status testing';
+        statusEl.innerHTML = '<span class="provider-test-spinner"></span> Validating API key...';
+
+        try {
+            const res = await fetch('/api/providers/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({provider: providerId}),
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                statusEl.className = 'provider-test-status success';
+                statusEl.textContent = '\u2713 ' + data.message;
+            } else {
+                statusEl.className = 'provider-test-status error';
+                statusEl.textContent = '\u2717 ' + data.message;
+            }
+        } catch (e) {
+            statusEl.className = 'provider-test-status error';
+            statusEl.textContent = '\u2717 Failed to test provider: ' + e.message;
+        }
+
+        // Auto-hide success after 4s
+        setTimeout(() => {
+            if (statusEl.classList.contains('success')) {
+                statusEl.style.display = 'none';
+            }
+        }, 4000);
+    } else {
+        document.getElementById('provider-test-status').style.display = 'none';
+    }
 }
 
 function renderTargetInputs() {
@@ -913,6 +1100,7 @@ function setupDashboard(match) {
 
     // Reset state
     state.activityLog = [];
+    state.apiHealthLog = [];
     state.latestFrame = null;
     document.getElementById('activity-log').innerHTML = '';
     document.getElementById('latest-thumbnail').src = '';
@@ -920,6 +1108,7 @@ function setupDashboard(match) {
     document.getElementById('dashboard-capturing').style.display = 'block';
     document.getElementById('dashboard-completed').style.display = 'none';
     document.getElementById('pause-overlay').classList.remove('active');
+    document.getElementById('api-error-overlay').classList.remove('active');
 
     // Reset filter stats
     document.getElementById('fs-total').textContent = '0';
@@ -927,6 +1116,20 @@ function setupDashboard(match) {
     document.getElementById('fs-black').textContent = '0';
     document.getElementById('fs-dup').textContent = '0';
     document.getElementById('fs-scene').textContent = '0';
+
+    // Show/hide API health section based on provider
+    const apiHealthSection = document.getElementById('api-health-section');
+    if (state.selectedProvider !== 'manual') {
+        apiHealthSection.style.display = 'block';
+        document.getElementById('api-health-dot').className = 'api-health-dot healthy';
+        document.getElementById('ah-total-calls').textContent = '0';
+        document.getElementById('ah-successful').textContent = '0';
+        document.getElementById('ah-errors').textContent = '0';
+        document.getElementById('ah-last-response').textContent = 'Waiting...';
+        document.getElementById('api-health-log').innerHTML = '';
+    } else {
+        apiHealthSection.style.display = 'none';
+    }
 }
 
 // ===== WEBSOCKET =====
@@ -969,6 +1172,12 @@ function connectWebSocket() {
                     video_time: 0,
                     saved: false,
                 });
+                break;
+            case 'api_health':
+                updateApiHealthUI(msg);
+                break;
+            case 'api_auto_stop':
+                showApiErrorOverlay(msg);
                 break;
             case 'error':
                 showError(msg.message);
@@ -1055,6 +1264,11 @@ function addToActivityLog(msg) {
     state.activityLog.unshift(msg);
     if (state.activityLog.length > 50) state.activityLog.pop();
     renderActivityLog();
+
+    // Also log to API health log if this is a classified frame with API info
+    if (msg.type === 'frame_classified' && state.selectedProvider !== 'manual') {
+        addToApiHealthLog(msg);
+    }
 }
 
 function renderActivityLog() {
@@ -1063,8 +1277,10 @@ function renderActivityLog() {
 
     state.activityLog.forEach(entry => {
         const div = document.createElement('div');
+        const isApiError = entry.api_error || entry.parse_error;
         div.className = 'log-entry';
         if (entry.anomaly) div.className += ' log-anomaly';
+        if (isApiError) div.className += ' log-api-error';
 
         const now = new Date();
         const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
@@ -1077,6 +1293,14 @@ function renderActivityLog() {
                 <span class="log-file">${videoTimeStr}</span>
                 <span class="log-type">${classifiedAs}</span>
                 <span class="log-skip">\u2192skip</span>
+            `;
+        } else if (isApiError) {
+            const errorTag = entry.api_error ? 'API ERR' : 'PARSE ERR';
+            div.innerHTML = `
+                <span class="log-time">${timeStr}</span>
+                <span class="log-file">${videoTimeStr}</span>
+                <span class="log-type log-error-badge">${errorTag}</span>
+                <span class="log-conf">${(entry.reasoning || '').substring(0, 60)}</span>
             `;
         } else {
             const conf = entry.confidence ? `${Math.round(entry.confidence * 100)}%` : '';
@@ -1091,6 +1315,71 @@ function renderActivityLog() {
 
         container.appendChild(div);
     });
+}
+
+// ===== API HEALTH UI =====
+function updateApiHealthUI(msg) {
+    const dot = document.getElementById('api-health-dot');
+    dot.className = 'api-health-dot ' + (msg.status || 'healthy');
+
+    document.getElementById('ah-total-calls').textContent = msg.total_calls || 0;
+    document.getElementById('ah-successful').textContent = msg.total_successful || 0;
+    document.getElementById('ah-errors').textContent = msg.total_errors || 0;
+    document.getElementById('ah-last-response').textContent = msg.last_response || 'Waiting...';
+}
+
+function addToApiHealthLog(msg) {
+    if (!state.apiHealthLog) state.apiHealthLog = [];
+    state.apiHealthLog.unshift(msg);
+    if (state.apiHealthLog.length > 20) state.apiHealthLog.pop();
+    renderApiHealthLog();
+}
+
+function renderApiHealthLog() {
+    const container = document.getElementById('api-health-log');
+    if (!container) return;
+    container.innerHTML = '';
+
+    (state.apiHealthLog || []).forEach(entry => {
+        const div = document.createElement('div');
+        const isError = entry.api_error || entry.parse_error;
+        div.className = 'api-log-entry' + (isError ? ' api-log-error' : '');
+
+        const timeStr = formatTime(entry.video_time || 0);
+        const reasoning = entry.reasoning || '';
+        const classified = entry.classified_as || '';
+        const conf = entry.confidence ? `${Math.round(entry.confidence * 100)}%` : '';
+
+        if (isError) {
+            div.innerHTML = `
+                <span class="api-log-time">${timeStr}</span>
+                <span class="api-log-status api-log-err-badge">ERROR</span>
+                <span class="api-log-detail">${reasoning.substring(0, 100)}</span>
+            `;
+        } else {
+            div.innerHTML = `
+                <span class="api-log-time">${timeStr}</span>
+                <span class="api-log-status api-log-ok-badge">${classified}</span>
+                <span class="api-log-conf">${conf}</span>
+                <span class="api-log-detail">${reasoning.substring(0, 80)}</span>
+            `;
+        }
+        container.appendChild(div);
+    });
+}
+
+function showApiErrorOverlay(msg) {
+    const overlay = document.getElementById('api-error-overlay');
+    overlay.classList.add('active');
+
+    document.getElementById('api-error-detail').textContent =
+        msg.message || 'Multiple consecutive API errors. Capture has been stopped.';
+
+    const stats = document.getElementById('api-error-stats');
+    stats.innerHTML = `
+        <div>API errors: <span class="mono">${msg.total_api_errors || 0}</span></div>
+        <div>Parse errors: <span class="mono">${msg.total_parse_errors || 0}</span></div>
+    `;
 }
 
 function updateLatestFrame(msg) {
@@ -1980,8 +2269,16 @@ async function scrapeNavigator() {
 
     document.getElementById('nav-results').style.display = '';
     document.getElementById('nav-person-name').textContent = data.name;
-    document.getElementById('nav-person-info').textContent =
-        `${data.type} \u00b7 ${data.total_matches} matches`;
+
+    if (state.navMode === 'team') {
+        const seasonCount = (data.seasons || []).length;
+        document.getElementById('nav-person-info').textContent =
+            `${data.total_matches} matches \u00b7 ${seasonCount} season${seasonCount !== 1 ? 's' : ''}`;
+    } else {
+        const clubCount = (data.clubs || []).length;
+        document.getElementById('nav-person-info').textContent =
+            `${data.type} \u00b7 ${data.total_matches} matches across ${clubCount} club${clubCount !== 1 ? 's' : ''}`;
+    }
 
     if (state.navMode === 'team') {
         renderTeamTree(data);
@@ -2030,6 +2327,7 @@ function renderNavigatorTree(data) {
             seasonDiv.innerHTML = `<div class="nav-season-header">${season.season} ${season.competition}</div>`;
 
             for (const match of season.matches) {
+                const stageText = match.stage ? ` - ${match.stage}` : '';
                 const matchDiv = document.createElement('div');
                 matchDiv.className = 'nav-match';
                 matchDiv.innerHTML = `
@@ -2039,8 +2337,7 @@ function renderNavigatorTree(data) {
                                data-date="${match.date}" data-season="${season.season}"
                                data-comp="${season.competition}" data-stage="${match.stage}"
                                onchange="updateNavSelection()" />
-                        ${match.date ? match.date + ' \u00b7 ' : ''}${match.home_team} vs ${match.away_team}
-                        ${match.stage ? `<span class="nav-stage">${match.stage}</span>` : ''}
+                        ${match.date ? match.date + ' \u00b7 ' : ''}${match.home_team} ${match.away_team}${stageText}
                     </label>
                 `;
                 seasonDiv.appendChild(matchDiv);
@@ -2069,12 +2366,10 @@ function renderTeamTree(data) {
         for (const comp of season.competitions) {
             const compDiv = document.createElement('div');
             compDiv.className = 'nav-season';
-            compDiv.innerHTML = `<div class="nav-season-header">\uD83C\uDFC6 ${comp.name} (${comp.matches.length})</div>`;
+            compDiv.innerHTML = `<div class="nav-season-header">\uD83C\uDFC6 ${comp.name} <span class="nav-comp-count">(${comp.matches.length})</span></div>`;
 
             for (const match of comp.matches) {
-                const ha = match.home_away ? ` (${match.home_away})` : '';
-                const score = match.score ? ` ${match.score}` : '';
-                const opponent = match.home_away === 'H' ? match.away_team : match.home_team;
+                const stageText = match.stage ? ` - ${match.stage}` : '';
 
                 const matchDiv = document.createElement('div');
                 matchDiv.className = 'nav-match';
@@ -2087,7 +2382,7 @@ function renderTeamTree(data) {
                                data-comp="${comp.name}" data-ha="${match.home_away}"
                                data-score="${match.score || ''}"
                                onchange="updateNavSelection()" />
-                        ${match.date ? match.date + ' \u00b7 ' : ''}${opponent}${ha}${score}
+                        ${match.date ? match.date + ' \u00b7 ' : ''}${match.home_team} ${match.away_team}${stageText}
                     </label>
                 `;
                 compDiv.appendChild(matchDiv);
@@ -2124,7 +2419,7 @@ function filterNavigatorResults() {
 
     if (!state.navigatorData) return;
 
-    // Show/hide matches based on filters
+    // 1. Show/hide individual matches based on season + competition filters
     const allMatches = document.querySelectorAll('.nav-match');
     allMatches.forEach(m => {
         const cb = m.querySelector('.nav-match-cb');
@@ -2135,16 +2430,26 @@ function filterNavigatorResults() {
         m.style.display = show ? '' : 'none';
     });
 
-    // Show/hide clubs
-    const allClubs = document.querySelectorAll('.nav-club');
-    allClubs.forEach(c => {
+    // 2. Hide competition containers (.nav-season) with no visible matches
+    document.querySelectorAll('.nav-season').forEach(compDiv => {
+        const visibleMatches = compDiv.querySelectorAll('.nav-match:not([style*="display: none"])');
+        compDiv.style.display = visibleMatches.length > 0 ? '' : 'none';
+    });
+
+    // 3. Hide season/club containers (.nav-club) with no visible children
+    document.querySelectorAll('.nav-club').forEach(c => {
         const header = c.querySelector('.nav-club-header strong');
         if (!header) return;
+
+        // For person mode: also filter by club name
         if (club && !header.textContent.includes(club)) {
             c.style.display = 'none';
-        } else {
-            c.style.display = '';
+            return;
         }
+
+        // Hide if all child competition sections are hidden
+        const visibleChildren = c.querySelectorAll('.nav-season:not([style*="display: none"])');
+        c.style.display = visibleChildren.length > 0 ? '' : 'none';
     });
 }
 

@@ -1,102 +1,303 @@
-# Footballia Screenshotter
+<p align="center">
+  <img src="screenshots/capture-dashboard.png" alt="Footballia Screenshotter — Live Capture Dashboard" width="700">
+</p>
 
-Automated football broadcast frame capture and classification tool. Captures screenshots from match videos, classifies each frame by camera angle using AI, and produces organized datasets ready for annotation and ML training.
+<h1 align="center">Footballia Screenshotter</h1>
+
+<p align="center">
+  <strong>Automated football broadcast frame capture &amp; AI classification</strong><br>
+  Turn any match video into a labeled image dataset — in minutes, not hours.
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick Start</a> &bull;
+  <a href="#-how-it-works">How It Works</a> &bull;
+  <a href="#-features">Features</a> &bull;
+  <a href="#-api-key-setup">API Keys</a> &bull;
+  <a href="#-export-formats">Export</a> &bull;
+  <a href="#-cost-estimate">Cost</a>
+</p>
+
+---
+
+## What is this?
+
+**Footballia Screenshotter** captures frames from football match videos, classifies each frame by camera angle (or other criteria) using AI, and produces organized, labeled datasets ready for annotation and ML training.
+
+Whether you're building a computer vision model, studying tactical formations, or just need organized match screenshots — this tool does the heavy lifting.
+
+**Three ways to feed it video:**
+
+| Source | Description |
+|--------|-------------|
+| **Footballia** | Free football archive — paste a URL and go |
+| **Local Files** | Your own `.mp4`, `.mkv`, `.avi` files |
+| **Streaming Sites** | ESPN+, Paramount+, YouTube *(under construction)* |
+
+---
+
+## Screenshots
+
+> *Click any image to view full size.*
+
+### Home Screen
+Your command center. Everything starts here — access your match library, start a quick capture, browse matches by coach or player, or export your dataset.
+
+<p align="center">
+  <img src="screenshots/home-screen.png" alt="Home Screen" width="700">
+</p>
+
+### Match Library
+All your saved matches in one place. See dates, opponents, home/away status, and capture readiness at a glance. Click any match to configure and start capturing.
+
+<p align="center">
+  <img src="screenshots/match-library.png" alt="Match Library" width="700">
+</p>
+
+### Quick Capture
+Just paste a Footballia URL and hit go. No setup needed — uses smart defaults so you can start capturing immediately.
+
+<p align="center">
+  <img src="screenshots/quick-capture.png" alt="Quick Capture Dialog" width="450">
+</p>
+
+### Match Configuration
+Full control over every capture session. Choose your classification task, AI provider, capture mode, and set per-category screenshot targets.
+
+<p align="center">
+  <img src="screenshots/match-config-top.png" alt="Match Configuration — Task, Provider, and Capture Mode" width="700">
+</p>
+
+<p align="center">
+  <img src="screenshots/match-config-targets.png" alt="Match Configuration — Screenshot Targets" width="700">
+</p>
+
+**What you can configure:**
+- **Classification Task** — Camera Angle (8 categories), Match Events (13), Scene Type (11), Tactical Formation (10), or create your own
+- **AI Provider** — OpenAI GPT-4o-mini, Google Gemini Flash, or Manual (free)
+- **Capture Mode** — Full match, Goals Only, or Custom Time Ranges
+- **Capture Preset** — Training Data, Tactical Analysis, Quick Test, or fully Custom targets
+- **Per-Category Targets** — Set exactly how many frames you need for each category (e.g., 50 WIDE_CENTER, 20 MEDIUM, 5 AERIAL)
+
+### Browse by Coach / Player / Team
+Paste a Footballia person or team URL to discover all their matches. Select the ones you want and batch-capture them all at once.
+
+<p align="center">
+  <img src="screenshots/browse-coach-player.png" alt="Browse by Coach / Player / Team" width="700">
+</p>
+
+### Live Capture Dashboard
+Watch the magic happen in real-time. See frames being captured, classified, and sorted — with live progress bars, API health monitoring, and a scrolling classification log.
+
+<p align="center">
+  <img src="screenshots/capture-dashboard.png" alt="Live Capture Dashboard" width="700">
+</p>
+
+### Statistics & Export
+Track your season progress, see camera angle distribution, and export your dataset in standard ML formats with one click.
+
+<p align="center">
+  <img src="screenshots/statistics-export.png" alt="Statistics and Export" width="700">
+</p>
+
+---
 
 ## Features
 
-- **3 Video Sources**: Footballia (free archive), local video files (.mp4/.mkv), any streaming site
-- **3 Classification Modes**: OpenAI GPT-4o-mini, Google Gemini Flash, Manual
-- **4 Analysis Tasks**: Camera angle, tactical formation, match events, scene type — or create custom tasks
-- **Smart Capture**: Pre-filter saves 30-40% API costs, adaptive sampling, Goals Only mode, custom time ranges
-- **Gallery/Review UI**: Keyboard-driven manual classification and AI review with undo
-- **Footballia Integration**: Auto-scrapes lineups, goals, match data. Browse by coach/player/team.
-- **Annotation Tool Bridge**: Generates annotation_ready/ packages with metadata + roster CSVs
-- **Batch Capture**: Queue multiple matches for automated sequential processing
-- **Export**: COCO JSON, ImageNet, CSV, HuggingFace Datasets
-- **Project Management**: Create/delete projects with full data cleanup
-- **Progress Tracking**: Real-time WebSocket updates with progress bars during capture and navigation
+### Core
+- **3 Video Sources** — Footballia, local video files, streaming sites
+- **3 AI Providers** — OpenAI GPT-4o-mini, Google Gemini Flash, Manual classification (free)
+- **4 Built-in Tasks** — Camera angle, tactical formation, match events, scene type
+- **Custom Tasks** — Define your own categories and descriptions
+
+### Smart Capture
+- **Pre-filter** — Skips black frames, duplicates, and scene transitions locally (saves 30-40% on API costs)
+- **Adaptive Sampling** — Dynamically adjusts capture intervals based on scene changes
+- **Goals Only Mode** — Captures only around goal timestamps
+- **Custom Time Ranges** — Specify exact time windows to capture
+- **Capture Presets** — Pre-configured target sets for common use cases
+
+### Organization & Review
+- **Match Library** — Browse, search, and manage all your matches
+- **Gallery View** — Keyboard-driven manual classification and AI review with undo
+- **Batch Capture** — Queue multiple matches for automated sequential processing
+- **Browse by Coach/Player/Team** — Discover matches from Footballia person pages
+- **Project Management** — Create and delete projects with full data cleanup
+
+### Export & Integration
+- **4 Export Formats** — COCO JSON, ImageNet, CSV, HuggingFace Datasets
+- **Annotation Bridge** — Generates `annotation_ready/` packages with metadata + roster CSVs
+- **Season Statistics** — Track progress, accuracy, and costs across your whole season
+
+---
 
 ## Quick Start
+
+### 1. Clone & Install
 
 ```bash
 git clone https://github.com/Segundo-Volante/footballia-screenshotter.git
 cd footballia-screenshotter
 
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Install browser automation
 playwright install chromium
-
-# Set up API keys (optional — Manual mode works without keys)
-cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY and/or GEMINI_API_KEY
-
-# Start
-python main.py
-# Open http://localhost:8000
 ```
 
-## Platform Compatibility
+### 2. Set Up API Keys *(optional)*
 
-| Video Source        | Windows | macOS  | Linux | Status |
-|---------------------|---------|--------|-------|--------|
-| Footballia          | ✅      | ✅     | ✅    | **Fully supported** |
-| Local video files   | ✅      | ✅     | ✅    | **Fully supported** |
-| YouTube (free)      | ✅      | ✅     | ✅    | 🚧 Under construction |
-| ESPN+ (DRM)         | ✅      | ⚠️*    | ✅    | 🚧 Under construction |
-| Paramount+ (DRM)    | ✅      | ⚠️*    | ✅    | 🚧 Under construction |
+```bash
+cp .env.example .env
+```
 
-> **Note**: Only **Footballia** and **local video files** are fully tested and guaranteed to work. Other streaming site integrations are under active development and may not function reliably yet.
->
-> \* macOS: DRM platforms may produce black screenshots. Use local video files as an alternative.
+Open `.env` in your editor and add your key(s):
 
-## Usage
+```env
+# Pick one or both:
+OPENAI_API_KEY=sk-your-key-here        # ~$0.07 per 1000 frames
+GEMINI_API_KEY=your-gemini-key-here     # Free tier: 1,500 req/day
+```
 
-1. **First run**: Setup wizard asks for team name, season, competitions
-2. **Add matches**: Paste Footballia URLs via Quick Capture, browse the Match Library, or discover matches by coach/player/team
-3. **Configure**: Choose analysis task, AI provider, target counts per category, and capture mode (full match, goals only, or custom time ranges)
-4. **Capture**: Watch the dashboard as frames are captured, classified, and saved in real-time
-5. **Review**: Optionally review AI classifications in the Gallery view with keyboard shortcuts
-6. **Export**: Use the Statistics view to export datasets in standard ML formats (COCO, ImageNet, CSV, HuggingFace)
-7. **Delete project**: Use the "Delete Project" button on the home screen to wipe all data and start fresh
+> **Don't have an API key?** No problem — **Manual Classification** mode works without any keys. Frames are saved for you to classify by hand in the Gallery view.
+
+### 3. Launch
+
+```bash
+python main.py
+```
+
+Open **http://localhost:8000** in your browser. That's it!
+
+---
+
+## How It Works
+
+Here's the typical workflow from start to finish:
+
+```
+┌─────────────┐     ┌──────────────┐     ┌───────────────┐     ┌──────────────┐
+│  1. Choose   │────▶│  2. Configure │────▶│  3. Capture    │────▶│  4. Export    │
+│  a match     │     │  your task    │     │  & classify    │     │  your dataset │
+└─────────────┘     └──────────────┘     └───────────────┘     └──────────────┘
+```
+
+| Step | What You Do | What Happens |
+|------|-------------|--------------|
+| **1. Add a match** | Paste a Footballia URL, select from your library, or load a local video | Match metadata (lineups, goals, date) is auto-scraped if available |
+| **2. Configure** | Pick a classification task, AI provider, capture mode, and frame targets | Smart defaults are pre-filled — customize as needed |
+| **3. Capture** | Hit "Start Capture" and watch the dashboard | Frames are captured, pre-filtered, and classified by AI in real-time |
+| **4. Review** *(optional)* | Open the Gallery to verify or correct AI labels | Keyboard shortcuts make reviewing fast (1-8 keys to reclassify) |
+| **5. Export** | Choose your format from the Statistics page | Dataset is packaged and ready for your ML pipeline |
+
+---
 
 ## API Key Setup
 
-The app supports OpenAI and Google Gemini for AI-powered classification. Add your keys to a `.env` file in the project root:
+The app supports two AI providers for automatic classification. You only need **one** (or neither, if using Manual mode).
 
-```
+| Provider | Cost | Speed | How to Get a Key |
+|----------|------|-------|------------------|
+| **OpenAI GPT-4o-mini** | ~$0.07 / 1K frames | Fast | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| **Google Gemini Flash** | Free tier (1,500 req/day) | Fast | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| **Manual** | Free | You classify | No key needed |
+
+Add your keys to `.env` in the project root:
+
+```env
 OPENAI_API_KEY=sk-your-key-here
 GEMINI_API_KEY=your-gemini-key-here
 ```
 
-If no API key is configured, the UI will show instructions on where to add it. Manual classification mode works without any API keys.
+> **Important:** Do NOT put API keys in your shell profile (`~/.zshrc`, `~/.bashrc`, etc.). The `.env` file is gitignored and keeps your keys local to this project.
+
+---
+
+## Export Formats
+
+| Format | Best For | Output |
+|--------|----------|--------|
+| **COCO JSON** | Object detection pipelines | `annotations.json` + image folder |
+| **ImageNet** | Image classification models | Category-based folder structure |
+| **CSV** | Spreadsheets, pandas, custom scripts | `frames.csv` with all metadata |
+| **HuggingFace** | Sharing on HuggingFace Hub | Ready-to-upload dataset format |
+
+---
+
+## Platform Compatibility
+
+| Video Source | Windows | macOS | Linux | Status |
+|---|---|---|---|---|
+| Footballia | ✅ | ✅ | ✅ | **Fully supported** |
+| Local video files | ✅ | ✅ | ✅ | **Fully supported** |
+| YouTube (free) | ✅ | ✅ | ✅ | Under construction |
+| ESPN+ (DRM) | ✅ | ⚠️* | ✅ | Under construction |
+| Paramount+ (DRM) | ✅ | ⚠️* | ✅ | Under construction |
+
+> \* **macOS + DRM**: Some streaming platforms may produce black screenshots due to DRM restrictions. Use local video files as a workaround.
+
+---
+
+## Cost Estimate
+
+With **GPT-4o-mini** and pre-filter enabled:
+
+| Scope | Estimated Cost |
+|-------|---------------|
+| 1 match (~120 API calls) | **~$0.008** |
+| Full 34-match season | **~$0.26** |
+| Manual mode | **$0.00** |
+
+The pre-filter catches black frames, duplicates, and non-game content *before* sending anything to the API, saving 30-40% in costs.
+
+---
 
 ## Project Structure
 
 ```
-backend/
-  server.py              - FastAPI routes + WebSocket
-  pipeline.py            - Main capture orchestration
-  sources/               - Video source implementations (Footballia, local file, generic web)
-  classifiers/           - AI classification providers (OpenAI, Gemini, Manual)
-  pre_filter.py          - Local frame analysis (zero cost)
-  adaptive_sampler.py    - Dynamic capture intervals
-  annotation_bridge.py   - annotation_ready/ package generator
-  batch_manager.py       - Multi-match queue
-  footballia_navigator.py - Browse by coach/player/team
-  footballia_scraper.py  - Match page data extraction
-  stats_aggregator.py    - Season statistics
-  exporter.py            - Dataset export (COCO, ImageNet, CSV, HuggingFace)
-  project_config.py      - Project creation and deletion
-  match_db.py            - SQLite database for matches, captures, frames
-frontend/
-  index.html             - Single-page web UI
-  app.js                 - Frontend application logic
-  style.css              - Styles
-config/
-  project.json           - Team/season configuration (auto-generated)
-  tasks/                 - Analysis task templates (JSON)
-  config.yaml            - App settings (sampling, browser, AI models)
+footballia-screenshotter/
+├── main.py                    # Entry point — starts the server
+├── config.yaml                # App settings (sampling, browser, AI models)
+├── requirements.txt           # Python dependencies
+├── .env.example               # Template for API keys
+│
+├── backend/
+│   ├── server.py              # FastAPI routes + WebSocket
+│   ├── pipeline.py            # Main capture orchestration
+│   ├── sources/               # Video source implementations
+│   │   ├── footballia.py      #   Footballia player integration
+│   │   ├── local_file.py      #   Local .mp4/.mkv/.avi support
+│   │   └── generic_web.py     #   Generic streaming site capture
+│   ├── classifiers/           # AI classification providers
+│   │   ├── openai_classifier.py
+│   │   ├── gemini_classifier.py
+│   │   └── manual_classifier.py
+│   ├── pre_filter.py          # Local frame analysis (zero API cost)
+│   ├── adaptive_sampler.py    # Dynamic capture intervals
+│   ├── batch_manager.py       # Multi-match queue processing
+│   ├── footballia_navigator.py # Browse by coach/player/team
+│   ├── footballia_scraper.py  # Match page data extraction
+│   ├── annotation_bridge.py   # annotation_ready/ package generator
+│   ├── stats_aggregator.py    # Season statistics
+│   ├── exporter.py            # Dataset export (COCO, ImageNet, CSV, HF)
+│   ├── project_config.py      # Project creation and deletion
+│   └── match_db.py            # SQLite database for matches + frames
+│
+├── frontend/
+│   ├── index.html             # Single-page web UI
+│   ├── app.js                 # Frontend application logic
+│   └── style.css              # Styles
+│
+├── config/
+│   ├── project.json           # Team/season config (auto-generated)
+│   └── tasks/                 # Classification task templates (JSON)
+│
+├── screenshots/               # README screenshots
+└── tests/                     # Test suite
 ```
+
+---
 
 ## Running Tests
 
@@ -105,35 +306,33 @@ pip install pytest
 pytest tests/ -v
 ```
 
+---
+
 ## Docker
 
 ```bash
-# Local file mode (works headless):
+# Best for local video file processing:
 docker-compose up
 
-# Set API keys in .env or pass via environment:
+# Pass API keys via environment:
 OPENAI_API_KEY=sk-... docker-compose up
 ```
 
-> **Note**: Footballia mode requires a visible browser (non-headless). Docker works best for local video file processing.
+> **Note:** Footballia mode requires a visible browser (non-headless). Docker works best for local video file processing.
 
-## Cost Estimate
-
-With GPT-4o-mini and pre-filter enabled:
-
-* ~$0.008 per match (~120 API calls after filtering)
-* ~$0.26 for an entire 34-match season
-* Manual mode: $0.00 (no API calls)
+---
 
 ## Disclaimer
 
 This project is intended for **educational and research purposes only**. It is not designed or licensed for commercial use.
 
-**Regarding Footballia**: This tool captures screenshots at a throttled, responsible rate — it does **not** send rapid or concurrent requests that could overload Footballia's servers. The capture pipeline includes built-in delays and adaptive sampling to minimize server impact.
+**Regarding Footballia:** This tool captures screenshots at a throttled, responsible rate — it does **not** send rapid or concurrent requests that could overload Footballia's servers. The capture pipeline includes built-in delays and adaptive sampling to minimize server impact.
 
-**Streaming site support**: Only **Footballia** and **local video file** modes are fully supported and tested. Other streaming site integrations (YouTube, ESPN+, Paramount+, etc.) are currently under construction and may not work reliably.
+**Streaming sites:** Only **Footballia** and **local video file** modes are fully supported and tested. Other streaming site integrations are under construction and may not work reliably.
 
-**Legal**: If you have any concerns about the use of this tool or its interaction with any third-party service, please open an issue on this repository and we will address it promptly.
+**Legal:** If you have any concerns about the use of this tool or its interaction with any third-party service, please [open an issue](https://github.com/Segundo-Volante/footballia-screenshotter/issues) and we will address it promptly.
+
+---
 
 ## License
 

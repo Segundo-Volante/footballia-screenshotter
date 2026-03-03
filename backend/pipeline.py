@@ -107,9 +107,9 @@ class Pipeline:
             classifier_config["detail"] = config.get("openai", {}).get("detail", "low")
             classifier_config["max_concurrent"] = config.get("openai", {}).get("max_concurrent", 3)
         elif provider == "gemini":
-            classifier_config["api_key"] = gemini_key
-            classifier_config["model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
-            classifier_config["free_tier"] = config.get("gemini", {}).get("free_tier", True)
+            classifier_config["gemini_api_key"] = gemini_key
+            classifier_config["gemini_model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
+            classifier_config["gemini_free_tier"] = config.get("gemini", {}).get("free_tier", True)
 
         self.classifier = create_classifier(provider, self.task, classifier_config)
         self.output = OutputManager(match, config["output"]["base_dir"], categories=self.categories)
@@ -161,6 +161,14 @@ class Pipeline:
         # Track last classification for adaptive sampler
         self._last_classification = None
         self._last_pre_filter = None
+
+        # API health tracking
+        self._consecutive_errors = 0
+        self._total_api_errors = 0
+        self._total_parse_errors = 0
+        self._total_successful = 0
+        self._api_auto_stopped = False
+        self._last_api_response_summary = ""
 
     @classmethod
     def recover_from_crash(cls, capture_id: int, db: MatchDB, **pipeline_kwargs) -> Optional['Pipeline']:
@@ -471,6 +479,79 @@ class Pipeline:
                 # For web sources, sleep and let the video play
                 await asyncio.sleep(interval)
 
+    def _track_api_health(self, classification: dict) -> bool:
+        """
+        Track API health from a classification result.
+        Returns True if capture should continue, False if auto-stop triggered.
+        """
+        has_api_error = classification.get("api_error", False)
+        has_parse_error = classification.get("parse_error", False)
+
+        if has_api_error:
+            self._consecutive_errors += 1
+            self._total_api_errors += 1
+            self._last_api_response_summary = classification.get("reasoning", "API error")
+            logger.warning(f"API error #{self._consecutive_errors}: {self._last_api_response_summary}")
+        elif has_parse_error:
+            self._consecutive_errors += 1
+            self._total_parse_errors += 1
+            raw_text = classification.get("raw_response", {}).get("raw_text", "")
+            self._last_api_response_summary = f"Parse error: {raw_text[:100]}"
+            logger.warning(f"Parse error #{self._consecutive_errors}: {self._last_api_response_summary}")
+        else:
+            self._consecutive_errors = 0
+            self._total_successful += 1
+            reasoning = classification.get("reasoning", "")
+            classified_as = classification.get("classified_as", "")
+            conf = classification.get("confidence", 0)
+            self._last_api_response_summary = f"{classified_as} ({conf:.0%})"
+            if reasoning:
+                self._last_api_response_summary += f" - {reasoning[:80]}"
+
+        # Auto-stop after 3 consecutive errors
+        if self._consecutive_errors >= 3:
+            self._api_auto_stopped = True
+            logger.error(f"Auto-stopping: {self._consecutive_errors} consecutive API errors")
+            return False
+
+        return True
+
+    def _get_api_health_status(self) -> str:
+        """Return 'healthy', 'warning', or 'error' based on current state."""
+        if self._consecutive_errors >= 3:
+            return "error"
+        elif self._consecutive_errors >= 1:
+            return "warning"
+        return "healthy"
+
+    async def _broadcast_api_health(self):
+        """Send API health status to clients."""
+        total_calls = self._total_successful + self._total_api_errors + self._total_parse_errors
+        await self.broadcast({
+            "type": "api_health",
+            "status": self._get_api_health_status(),
+            "consecutive_errors": self._consecutive_errors,
+            "total_calls": total_calls,
+            "total_errors": self._total_api_errors + self._total_parse_errors,
+            "total_api_errors": self._total_api_errors,
+            "total_parse_errors": self._total_parse_errors,
+            "total_successful": self._total_successful,
+            "last_response": self._last_api_response_summary,
+        })
+
+    async def _handle_auto_stop(self):
+        """Broadcast auto-stop and halt capture."""
+        await self.broadcast({
+            "type": "api_auto_stop",
+            "message": f"Capture stopped: {self._consecutive_errors} consecutive API errors. "
+                       f"Last error: {self._last_api_response_summary}",
+            "total_api_errors": self._total_api_errors,
+            "total_parse_errors": self._total_parse_errors,
+        })
+        self.status = "completed"
+        self._stop_requested = True
+        self._pause_event.set()
+
     async def _classify_loop(self):
         while self.status in ("capturing", "paused") or not self._queue.empty():
             if self._stop_requested and self._queue.empty():
@@ -488,6 +569,12 @@ class Pipeline:
             classification = await self.classifier.classify_frame(frame.jpeg_bytes)
             self._last_classification = classification
 
+            # ── Track API health ──
+            should_continue = self._track_api_health(classification)
+            if not should_continue:
+                await self._handle_auto_stop()
+                break
+
             classified_as = classification.get("classified_as", "OTHER")
             conf = classification.get("confidence", 0)
             is_pending = classification.get("is_pending", False)
@@ -498,6 +585,13 @@ class Pipeline:
             consistency = self.consistency.check(classified_as, scene_changed)
             if consistency["anomaly"]:
                 logger.info(f"Anomaly: {consistency['note']}")
+
+            # Build common broadcast fields for API health visibility
+            api_health_fields = {
+                "api_error": classification.get("api_error", False),
+                "parse_error": classification.get("parse_error", False),
+                "reasoning": classification.get("reasoning", ""),
+            }
 
             # ── Save decision ──
             if is_pending:
@@ -512,6 +606,7 @@ class Pipeline:
                     "saved": True,
                     "thumbnail_b64": thumbnail_b64,
                     "is_pending": True,
+                    **api_health_fields,
                 })
             else:
                 target_for_type = self._adjusted_targets.get(classified_as, 0)
@@ -549,6 +644,7 @@ class Pipeline:
                         "thumbnail_b64": thumbnail_b64,
                         "anomaly": consistency["anomaly"],
                         "suggested_type": consistency.get("suggested_type"),
+                        **api_health_fields,
                     })
                 else:
                     await self.broadcast({
@@ -556,6 +652,7 @@ class Pipeline:
                         "video_time": frame.video_time,
                         "classified_as": classified_as,
                         "reason": "target_met",
+                        **api_health_fields,
                     })
 
             if self._all_targets_met():
@@ -594,6 +691,11 @@ class Pipeline:
                 "pre_filter_stats": self.pre_filter.get_stats(),
             }
             await self.broadcast(progress)
+
+            # Broadcast API health status alongside progress (only for AI providers)
+            if self.provider != "manual":
+                await self._broadcast_api_health()
+
             await asyncio.sleep(1)
 
     async def _run_goals_only(self):
@@ -659,6 +761,13 @@ class Pipeline:
 
                 # Classify
                 classification = await self.classifier.classify_frame(frame_bytes)
+
+                # Track API health
+                should_continue = self._track_api_health(classification)
+                if not should_continue:
+                    await self._handle_auto_stop()
+                    return
+
                 classified_as = classification.get("classified_as", "OTHER")
 
                 # In Goals Only mode, save ALL passing frames regardless of target
@@ -758,6 +867,12 @@ class Pipeline:
 
                 # Classify
                 classification = await self.classifier.classify_frame(frame_bytes)
+
+                # Track API health
+                should_continue = self._track_api_health(classification)
+                if not should_continue:
+                    await self._handle_auto_stop()
+                    return
 
                 # Consistency check
                 consistency_result = {"anomaly": False}

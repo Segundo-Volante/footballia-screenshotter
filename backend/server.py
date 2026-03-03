@@ -248,9 +248,13 @@ async def update_match(match_id: int, body: dict):
 @app.delete("/api/matches/{match_id}")
 async def delete_match(match_id: int):
     db = MatchDB()
+    match = db.get_match(match_id)
+    if not match:
+        db.close()
+        return {"status": "error", "message": "Match not found"}
     db.delete_match(match_id)
     db.close()
-    return {"status": "ok"}
+    return {"status": "ok", "deleted_match_id": match_id}
 
 
 @app.post("/api/matches/import-excel")
@@ -349,6 +353,71 @@ async def get_providers():
         },
     ]
     return providers
+
+
+# ── Provider test route ──
+
+@app.post("/api/providers/test")
+async def test_provider(body: dict):
+    """
+    Test an AI provider's API key by sending a tiny test image.
+    Returns success/error status so the UI can validate before capture starts.
+    """
+    provider = body.get("provider", "")
+    if not provider or provider == "manual":
+        return {"status": "ok", "message": "Manual mode requires no API key."}
+
+    try:
+        # Create a minimal 8x8 gray JPEG test image
+        from PIL import Image
+        import io
+        img = Image.new("RGB", (8, 8), color=(128, 128, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        test_jpeg = buf.getvalue()
+
+        # Build a minimal task config
+        task_config = {
+            "id": "_api_test",
+            "name": "API Test",
+            "prompt": "Reply with exactly: {\"test\": \"ok\"}",
+            "classification_field": "test",
+            "categories": ["ok"],
+        }
+
+        config = load_config()
+        classifier_config = dict(config)
+
+        if provider == "openai":
+            api_key = get_openai_key()
+            if not api_key or api_key == "sk-your-key-here":
+                return {"status": "error", "message": "OpenAI API key not set. Add OPENAI_API_KEY to your .env file."}
+            classifier_config["api_key"] = api_key
+            classifier_config["model"] = config.get("openai", {}).get("model", "gpt-4o-mini")
+        elif provider == "gemini":
+            api_key = get_gemini_key()
+            if not api_key or api_key == "your-gemini-key-here":
+                return {"status": "error", "message": "Gemini API key not set. Add GEMINI_API_KEY to your .env file."}
+            classifier_config["gemini_api_key"] = api_key
+            classifier_config["gemini_model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
+        else:
+            return {"status": "error", "message": f"Unknown provider: {provider}"}
+
+        from backend.classifiers import create_classifier
+        classifier = create_classifier(provider, task_config, classifier_config)
+        result = await classifier.classify_frame(test_jpeg)
+
+        if result.get("api_error"):
+            return {
+                "status": "error",
+                "message": f"API key invalid or service unavailable: {result.get('reasoning', 'Unknown error')}",
+            }
+
+        return {"status": "ok", "message": f"{provider.title()} API is working."}
+
+    except Exception as e:
+        logger.error(f"Provider test failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # ── Capture routes ──
@@ -692,6 +761,46 @@ async def health_check():
         result["status"] = "ok"
 
     return result
+
+
+# ── Match preview (scrape without capture) ──
+
+@app.post("/api/match/preview")
+async def preview_match(body: dict):
+    """Scrape a Footballia match page for metadata (teams, lineups, goals) without starting capture."""
+    url = body.get("url", "")
+    if not url:
+        return {"error": "URL required"}
+
+    try:
+        from backend.sources.footballia import FootballiaSource
+        source = FootballiaSource(load_config().get("browser", {}))
+        launched = await source.setup(url=url, broadcast_fn=broadcast, navigate_only=True)
+        if not launched:
+            return {"error": "Failed to open Footballia page"}
+
+        data = source.match_data or {}
+        # Don't close — browser can be reused for capture
+        return {
+            "status": "ok",
+            "home_team": data.get("home_team", ""),
+            "away_team": data.get("away_team", ""),
+            "competition": data.get("competition", ""),
+            "season": data.get("season", ""),
+            "stage": data.get("stage", ""),
+            "venue": data.get("venue", ""),
+            "date": data.get("date", ""),
+            "home_lineup": data.get("home_lineup", []),
+            "away_lineup": data.get("away_lineup", []),
+            "home_coach": data.get("home_coach"),
+            "away_coach": data.get("away_coach"),
+            "goals": data.get("goals", []),
+            "result": data.get("result"),
+            "scrape_success": data.get("scrape_success", False),
+        }
+    except Exception as e:
+        logger.error(f"Match preview failed: {e}")
+        return {"error": f"Preview failed: {e}"}
 
 
 # ── Navigator routes ──
@@ -1063,10 +1172,20 @@ async def test_custom_prompt(body: dict):
     try:
         from backend.classifiers import create_classifier
         config = load_config()
+        classifier_config = dict(config)
+
+        # Ensure classifier gets the keys in the format it expects
+        if provider == "openai":
+            classifier_config["api_key"] = get_openai_key()
+            classifier_config["model"] = config.get("openai", {}).get("model", "gpt-4o-mini")
+        elif provider == "gemini":
+            classifier_config["gemini_api_key"] = get_gemini_key()
+            classifier_config["gemini_model"] = config.get("gemini", {}).get("model", "gemini-2.0-flash")
+
         classifier = create_classifier(
             provider=provider,
             task=task_config,
-            config=config,
+            config=classifier_config,
         )
         result = await classifier.classify_frame(frame_bytes)
         return {

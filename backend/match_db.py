@@ -159,7 +159,52 @@ class MatchDB:
         self.conn.commit()
 
     def delete_match(self, match_id: int):
+        """Delete a match and cascade-delete all related captures, frames, files, and collection associations."""
+        from pathlib import Path
+        import shutil
+
+        # 1. Get all captures for this match
+        captures = self.conn.execute(
+            "SELECT id, output_dir FROM captures WHERE match_id = ?", (match_id,)
+        ).fetchall()
+
+        for cap in captures:
+            cap_id = cap["id"]
+            output_dir = cap["output_dir"]
+
+            # 2. Delete frame files from disk
+            frames = self.conn.execute(
+                "SELECT filepath FROM frames WHERE capture_id = ?", (cap_id,)
+            ).fetchall()
+            for frame in frames:
+                fp = frame["filepath"]
+                if fp:
+                    try:
+                        Path(fp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            # 3. Delete frames from DB
+            self.conn.execute("DELETE FROM frames WHERE capture_id = ?", (cap_id,))
+
+            # 4. Delete capture output directory if it exists
+            if output_dir:
+                try:
+                    dir_path = Path(output_dir)
+                    if dir_path.exists() and dir_path.is_dir():
+                        shutil.rmtree(dir_path, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # 5. Delete captures from DB
+        self.conn.execute("DELETE FROM captures WHERE match_id = ?", (match_id,))
+
+        # 6. Delete collection associations
+        self.conn.execute("DELETE FROM collection_matches WHERE match_id = ?", (match_id,))
+
+        # 7. Delete the match itself
         self.conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+
         self.conn.commit()
 
     # ── Import from Excel ──
