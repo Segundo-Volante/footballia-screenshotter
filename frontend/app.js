@@ -37,6 +37,7 @@ const state = {
     selectedSourceType: 'footballia',
     platformInfo: null,
     annotationReadyPath: null,
+    lineupAvailable: false,
     // Part 5 additions
     navigatorData: null,
     batchPaused: false,
@@ -322,6 +323,7 @@ function renderMatchTable(matches) {
             <td class="col-score">${m.score || ''}</td>
             <td>${status}</td>
             <td class="col-actions">
+                ${m.captured ? `<button class="btn-export-small" onclick="event.stopPropagation(); exportForAnnotation(${m.id})" title="Export for Annotation" id="btn-export-annotation-${m.id}">&#128230;</button>` : ''}
                 <button class="btn-delete-match" data-match-id="${m.id}" data-opponent="${(m.opponent || '').replace(/"/g, '&quot;')}" title="Delete match">&times;</button>
             </td>
         `;
@@ -1173,6 +1175,25 @@ function connectWebSocket() {
                     saved: false,
                 });
                 break;
+            case 'lineup_scraped':
+                addToActivityLog({
+                    type: 'frame_classified',
+                    classified_as: msg.home_players > 0 ? 'INFO' : 'WARN',
+                    filename: msg.message,
+                    video_time: 0,
+                    saved: false,
+                });
+                state.lineupAvailable = msg.home_players > 0;
+                break;
+            case 'export_progress':
+                {
+                    const btn = document.getElementById('btn-export-annotation');
+                    if (btn) btn.innerHTML = `&#9203; ${msg.message || `Frame ${msg.current}/${msg.total}`}`;
+                }
+                break;
+            case 'export_complete':
+                // Handled by the fetch response in exportForAnnotation()
+                break;
             case 'api_health':
                 updateApiHealthUI(msg);
                 break;
@@ -1907,6 +1928,19 @@ function showCompletionActions(summary) {
             <button class="btn-secondary" onclick="openGallery(${state.activeCaptureId}, 'review')">
                 Review Classifications${anomalies > 0 ? ` (${anomalies} flagged)` : ''}
             </button>
+        `;
+    }
+
+    // Export for Annotation button (match_id from state)
+    if (state.selectedMatch && state.selectedMatch.id) {
+        const lineupStatus = state.lineupAvailable
+            ? '<span style="color:#A8E6A1;">&#10003; Lineup available</span>'
+            : '<span style="color:#999;">&#10007; No lineup data</span>';
+        html += `
+            <button class="btn-secondary" id="btn-export-annotation" onclick="exportForAnnotation(${state.selectedMatch.id})">
+                &#128230; Export for Annotation
+            </button>
+            <span class="lineup-status" style="font-size:0.85em; margin-left:8px;">${lineupStatus}</span>
         `;
     }
 
@@ -2732,6 +2766,59 @@ async function exportDataset(format) {
         statusEl.textContent = `Error: ${data.error}`;
     } else {
         statusEl.textContent = `\u2713 Exported to: ${data.path}`;
+    }
+}
+
+// ===== EXPORT FOR ANNOTATION =====
+
+async function exportForAnnotation(matchId) {
+    const btn = document.getElementById('btn-export-annotation') || document.getElementById(`btn-export-annotation-${matchId}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '&#9203; Exporting...';
+    }
+
+    try {
+        const res = await fetch('/api/export-annotation', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({match_id: matchId}),
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+            if (btn) {
+                btn.innerHTML = `&#9989; Exported ${data.frames_exported} frames`;
+                btn.style.background = '#2D5A27';
+                btn.style.color = '#A8E6A1';
+            }
+            // Show path info
+            const actionsDiv = document.getElementById('completion-actions');
+            if (actionsDiv) {
+                const info = document.createElement('div');
+                info.className = 'annotation-ready-info';
+                info.innerHTML = `
+                    <span class="annotation-ready-icon">&#128230;</span>
+                    <div>
+                        <strong>Annotation bundle ready</strong>
+                        <p class="annotation-ready-path">${data.export_path}</p>
+                        <p class="hint">${data.frames_exported} frames exported, ${data.frames_skipped} skipped. Generated: ${data.files_generated.join(', ')}</p>
+                        <p class="hint">Squad data: ${data.lineup_available ? '&#10003; Auto-populated from lineup' : '&#10007; Not available (squad.json is a placeholder)'}</p>
+                    </div>
+                `;
+                actionsDiv.appendChild(info);
+            }
+        } else {
+            if (btn) {
+                btn.innerHTML = `&#10060; ${data.message || 'Export failed'}`;
+                btn.disabled = false;
+            }
+        }
+    } catch (err) {
+        if (btn) {
+            btn.innerHTML = `&#10060; Export failed`;
+            btn.disabled = false;
+        }
     }
 }
 

@@ -224,6 +224,14 @@ class Pipeline:
         self.status = "capturing"
         self._start_wall_time = time.time()
 
+        # Save lineup.json if the source has lineup data
+        try:
+            if hasattr(self.source, 'lineup_data') and self.source.lineup_data:
+                from backend.lineup_scraper import save_lineup_json
+                save_lineup_json(self.source.lineup_data, self.output.get_output_dir())
+        except Exception as e:
+            logger.warning(f"Failed to save lineup.json: {e}")
+
         try:
             self._video_duration = await self.source.get_duration()
             logger.info(f"Video duration: {self._video_duration:.1f}s")

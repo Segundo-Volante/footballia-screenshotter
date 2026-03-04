@@ -19,6 +19,7 @@ from backend.footballia_navigator import FootballiaNavigator
 from backend.batch_manager import BatchManager
 from backend.stats_aggregator import StatsAggregator
 from backend.exporter import DatasetExporter
+from backend.annotation_exporter import AnnotationExporter
 
 app = FastAPI(title="Footballia Screenshotter")
 
@@ -1042,6 +1043,26 @@ async def export_dataset(body: dict):
         return {"error": str(e)}
     finally:
         exp.close()
+
+
+# ── Annotation export route ──
+
+@app.post("/api/export-annotation")
+async def export_annotation(body: dict):
+    """Export captured frames as a bundle for the annotation tool."""
+    match_id = body.get("match_id")
+    if not match_id:
+        return {"status": "error", "message": "match_id is required"}
+
+    exporter = AnnotationExporter(match_id, broadcast_fn=broadcast)
+    try:
+        result = await exporter.export_async()
+        return result
+    except Exception as e:
+        logger.error(f"Annotation export failed: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        exporter.close()
 
 
 # ── Collections routes ──

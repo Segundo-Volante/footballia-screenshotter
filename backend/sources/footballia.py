@@ -10,6 +10,7 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 
 from backend.sources.base import VideoSource
 from backend.footballia_scraper import FootballiaScraper
+from backend.lineup_scraper import scrape_lineup
 from backend.utils import logger
 
 PROFILE_DIR = Path(".browser_profile")
@@ -29,6 +30,7 @@ class FootballiaSource(VideoSource):
         self._url: str = ""
         self._scraper = FootballiaScraper()
         self.match_data: dict = {}  # Scraped page data
+        self.lineup_data: dict | None = None  # Structured lineup from lineup_scraper
 
     # ── VideoSource properties ──
 
@@ -111,6 +113,29 @@ class FootballiaSource(VideoSource):
         except Exception as e:
             logger.warning(f"Scraper failed (non-fatal): {e}")
             self.match_data = {"scrape_success": False}
+
+        # ── Scrape structured lineup data ──
+        try:
+            self.lineup_data = await scrape_lineup(self._page, url)
+            if self.lineup_data and broadcast_fn:
+                home_count = len(self.lineup_data["home_team"]["players"])
+                away_count = len(self.lineup_data["away_team"]["players"])
+                await broadcast_fn({
+                    "type": "lineup_scraped",
+                    "home_players": home_count,
+                    "away_players": away_count,
+                    "message": f"Lineup found: {home_count} home, {away_count} away players",
+                })
+            elif not self.lineup_data and broadcast_fn:
+                await broadcast_fn({
+                    "type": "lineup_scraped",
+                    "home_players": 0,
+                    "away_players": 0,
+                    "message": "Lineup not available for this match",
+                })
+        except Exception as e:
+            logger.warning(f"Lineup scraping failed (non-fatal): {e}")
+            self.lineup_data = None
 
         # Detect parts
         await self._detect_parts()

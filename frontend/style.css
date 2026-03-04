@@ -189,6 +189,24 @@ body {
     color: #e84545;
     background: rgba(232, 69, 69, 0.1);
 }
+.btn-export-small {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1em;
+    color: var(--text-tertiary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.match-table tr:hover .btn-export-small {
+    opacity: 1;
+}
+.btn-export-small:hover {
+    color: var(--accent);
+    background: rgba(245, 166, 35, 0.1);
+}
 
 .hint {
     margin-top: var(--space-lg);
