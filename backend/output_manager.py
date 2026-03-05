@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +56,7 @@ class OutputManager:
     def _load_existing_metadata(self):
         csv_path = self.base_path / "metadata.csv"
         if csv_path.exists():
-            with open(csv_path, "r") as f:
+            with open(csv_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     self.results.append(row)
@@ -173,7 +174,7 @@ class OutputManager:
         if not self.results:
             return
 
-        with open(csv_path, "w", newline="") as f:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
             writer.writeheader()
             for r in self.results:
@@ -229,8 +230,8 @@ class OutputManager:
             summary["sequence_stats"] = self._build_sequence_stats(sequence_records)
 
         json_path = self.base_path / "summary.json"
-        with open(json_path, "w") as f:
-            json.dump(summary, f, indent=2)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
 
         logger.info(f"Wrote summary.json")
 
@@ -355,8 +356,8 @@ class OutputManager:
         }
 
         json_path = self.base_path / "frame_metadata.json"
-        with open(json_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
 
         logger.info(f"Wrote frame_metadata.json with {len(frames)} frames, {len(sequence_summary)} sequences")
         return str(json_path)
@@ -396,7 +397,7 @@ class OutputManager:
                 dest = dest_dir / f"{stem}_{counter}{suffix}"
                 counter += 1
 
-        src.rename(dest)
+        shutil.move(str(src), str(dest))
         logger.info(f"Moved frame: {src.name} from {src.parent.name}/ to {new_category}/")
         return str(dest)
 
@@ -415,5 +416,5 @@ class OutputManager:
             while dest.exists():
                 dest = dest_dir / f"{stem}_{counter}{suffix}"
                 counter += 1
-        src.rename(dest)
+        shutil.move(str(src), str(dest))
         return str(dest)

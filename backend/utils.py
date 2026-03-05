@@ -25,7 +25,7 @@ def setup_logging() -> logging.Logger:
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    fh = logging.FileHandler(LOG_DIR / "footballia.log")
+    fh = logging.FileHandler(LOG_DIR / "footballia.log", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
@@ -37,7 +37,7 @@ logger = setup_logging()
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

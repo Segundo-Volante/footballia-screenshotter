@@ -334,24 +334,48 @@ class FootballiaSource(VideoSource):
         lock_file = PROFILE_DIR / "SingletonLock"
         if lock_file.exists() or lock_file.is_symlink():
             try:
-                import os, signal
-                target = os.readlink(str(lock_file))
-                # Format: "hostname-pid"
-                pid_str = target.rsplit("-", 1)[-1]
-                pid = int(pid_str)
-                try:
-                    os.kill(pid, 0)  # Check if alive
-                    # Process exists — try to kill it gracefully
-                    logger.warning(f"Killing stale browser process {pid}")
-                    os.kill(pid, signal.SIGTERM)
-                    import time as _time
-                    _time.sleep(1)
+                import os, signal, platform as _plat
+                pid = None
+                if _plat.system() != "Windows" and lock_file.is_symlink():
+                    # Unix: lock is a symlink "hostname-pid"
+                    target = os.readlink(str(lock_file))
+                    pid_str = target.rsplit("-", 1)[-1]
+                    pid = int(pid_str)
+                elif _plat.system() == "Windows" and lock_file.is_file():
+                    # Windows: lock is a regular file containing the PID
                     try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                except ProcessLookupError:
-                    pass  # Already dead
+                        content = lock_file.read_text(encoding="utf-8").strip()
+                        pid_str = content.rsplit("-", 1)[-1]
+                        pid = int(pid_str)
+                    except (ValueError, OSError):
+                        pid = None
+
+                if pid is not None:
+                    if _plat.system() == "Windows":
+                        # Windows: use taskkill; os.kill(pid, 0) would terminate
+                        import subprocess
+                        ret = subprocess.run(
+                            ["tasklist", "/FI", f"PID eq {pid}"],
+                            capture_output=True, text=True,
+                        )
+                        if str(pid) in ret.stdout:
+                            logger.warning(f"Killing stale browser process {pid}")
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                           capture_output=True)
+                    else:
+                        try:
+                            os.kill(pid, 0)  # Check if alive
+                            logger.warning(f"Killing stale browser process {pid}")
+                            os.kill(pid, signal.SIGTERM)
+                            import time as _time
+                            _time.sleep(1)
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        except ProcessLookupError:
+                            pass  # Already dead
+
                 lock_file.unlink(missing_ok=True)
                 logger.info("Removed stale SingletonLock")
             except Exception as e:

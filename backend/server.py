@@ -1372,6 +1372,41 @@ async def browse_file(body: BrowseFileRequest):
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    elif system == "Windows":
+        # Windows: use PowerShell to open a native file dialog
+        filter_parts = []
+        for ft in body.filetypes:
+            if len(ft) >= 2:
+                filter_parts.append(f"{ft[0]}|{ft[1].replace(' ', ';')}")
+        filter_parts.append("All files|*.*")
+        filter_str = "|".join(filter_parts)
+
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            f"$d.Title = '{body.title}'; "
+            f"$d.Filter = '{filter_str}'; "
+        )
+        if body.initial_dir:
+            ps_script += f"$d.InitialDirectory = '{body.initial_dir}'; "
+        ps_script += (
+            "if ($d.ShowDialog() -eq 'OK') { $d.FileName } else { '' }"
+        )
+
+        try:
+            result = await asyncio.create_subprocess_exec(
+                "powershell", "-NoProfile", "-Command", ps_script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await result.communicate()
+            selected = stdout.decode().strip() if stdout else ""
+            if selected:
+                return {"status": "ok", "path": selected}
+            return {"status": "cancelled", "path": ""}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     else:
         return {"status": "error", "message": f"File browsing not supported on {system}"}
 
@@ -1405,7 +1440,7 @@ async def import_resample(body: ResampleImportRequest):
         return {"status": "error", "message": f"File not found: {body.file_path}"}
 
     try:
-        with open(file_path) as f:
+        with open(file_path, encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         return {"status": "error", "message": f"Invalid JSON: {e}"}

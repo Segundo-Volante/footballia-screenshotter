@@ -7,6 +7,11 @@ import sys
 import logging
 from pathlib import Path
 
+# Fix Windows console encoding for emoji/unicode output
+if sys.platform == "win32" and sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent))
 
