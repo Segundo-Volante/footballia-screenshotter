@@ -42,7 +42,106 @@ const state = {
     navigatorData: null,
     batchPaused: false,
     navMode: 'person',
+    // Sequence capture
+    sequenceProfiles: {},
+    sequenceDefaults: {},
+    // Resample
+    resampleTasks: [],
+    activeResampleTaskId: null,
 };
+
+// ===== FILE BROWSE =====
+
+async function browseForFile(inputId, title, filetypes, btnEl) {
+    const btn = btnEl || null;
+    if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        btn.style.cursor = 'wait';
+    }
+
+    try {
+        // Try native file picker (osascript on macOS, zenity on Linux)
+        const res = await fetch('/api/browse-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({title, filetypes}),
+        });
+        const data = await res.json();
+        if (data.status === 'ok' && data.path) {
+            document.getElementById(inputId).value = data.path;
+            document.getElementById(inputId).focus();
+            return;
+        }
+        if (data.status === 'cancelled') return;
+        // If error/unsupported, fall through to HTML file input
+        console.warn('Native picker unavailable, using HTML file input fallback');
+        await _browseFileHtmlFallback(inputId, filetypes);
+    } catch (e) {
+        // Server unreachable or osascript crashed — use HTML fallback
+        console.warn('Native picker failed, using HTML file input fallback:', e.message);
+        await _browseFileHtmlFallback(inputId, filetypes);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.style.opacity = '';
+            btn.style.cursor = '';
+        }
+    }
+}
+
+function _browseFileHtmlFallback(inputId, filetypes) {
+    return new Promise((resolve) => {
+        // Build accept string from filetypes (e.g. [["JSON","*.json"]] -> ".json")
+        let accept = '';
+        if (filetypes && filetypes.length) {
+            const exts = [];
+            for (const ft of filetypes) {
+                if (ft.length >= 2) {
+                    for (const ext of ft[1].split(/\s+/)) {
+                        const clean = ext.replace('*', '');
+                        if (clean) exts.push(clean);
+                    }
+                }
+            }
+            accept = exts.join(',');
+        }
+
+        const input = document.createElement('input');
+        input.type = 'file';
+        if (accept) input.accept = accept;
+        input.style.display = 'none';
+        document.body.appendChild(input);
+
+        input.addEventListener('change', async () => {
+            const file = input.files[0];
+            if (file) {
+                // Upload file to server temp and get the path
+                const form = new FormData();
+                form.append('file', file);
+                try {
+                    const res = await fetch('/api/upload-temp', {method: 'POST', body: form});
+                    const data = await res.json();
+                    if (data.status === 'ok' && data.path) {
+                        document.getElementById(inputId).value = data.path;
+                        document.getElementById(inputId).focus();
+                    }
+                } catch (e) {
+                    console.error('Upload fallback failed:', e);
+                }
+            }
+            document.body.removeChild(input);
+            resolve();
+        });
+
+        input.addEventListener('cancel', () => {
+            document.body.removeChild(input);
+            resolve();
+        });
+
+        input.click();
+    });
+}
 
 // ===== VIEW SWITCHING =====
 function showView(viewName) {
@@ -78,6 +177,10 @@ function showView(viewName) {
         loadBatchState();
     }
 
+    if (viewName === 'resample-dashboard') {
+        connectWebSocket();
+    }
+
     // Clean up gallery keyboard listener when leaving
     if (viewName !== 'gallery') {
         document.removeEventListener('keydown', galleryKeyHandler);
@@ -100,6 +203,8 @@ async function init() {
         state.cameraTypes = configRes.camera_types || [];
         state.cameraDescriptions = configRes.camera_descriptions || {};
         state.defaultTargets = configRes.defaults?.targets || {};
+        state.sequenceProfiles = configRes.sequence_profiles || {};
+        state.sequenceDefaults = JSON.parse(JSON.stringify(configRes.sequence_profiles || {}));
 
         // Load platform info
         try {
@@ -766,6 +871,7 @@ async function loadConfigView() {
         renderTaskCards();
         renderProviderCards();
         await loadTaskDetails();
+        renderSequenceProfileCards();
     } catch (e) {
         console.error('Config load error:', e);
         // Fallback to existing behavior
@@ -1040,6 +1146,7 @@ async function startCapture() {
         goal_times: state.scrapedGoals,
         goal_window: parseInt(document.getElementById('goal-window')?.value || '30'),
         custom_ranges: state.captureMode === 'custom_times' ? getCustomRanges() : [],
+        sequence_profiles: getSequenceProfilesForCapture(),
     };
 
     try {
@@ -1132,6 +1239,14 @@ function setupDashboard(match) {
     } else {
         apiHealthSection.style.display = 'none';
     }
+
+    // Show/hide sequence status panel
+    const seqPanel = document.getElementById('seq-status-panel');
+    const hasSequences = Object.values(state.sequenceProfiles).some(p => p.enabled);
+    if (seqPanel) {
+        seqPanel.style.display = hasSequences ? '' : 'none';
+        if (hasSequences) initSequenceStatusPanel();
+    }
 }
 
 // ===== WEBSOCKET =====
@@ -1200,6 +1315,12 @@ function connectWebSocket() {
             case 'api_auto_stop':
                 showApiErrorOverlay(msg);
                 break;
+            case 'sequence_state':
+                updateSequenceStatusUI(msg);
+                break;
+            case 'sequence_summary':
+                updateSequenceSummaryUI(msg);
+                break;
             case 'error':
                 showError(msg.message);
                 break;
@@ -1207,6 +1328,10 @@ function connectWebSocket() {
                 // Handle batch messages
                 if (msg.type && msg.type.startsWith('batch_')) {
                     handleBatchMessage(msg);
+                }
+                // Handle resample messages
+                if (msg.type && msg.type.startsWith('resample_')) {
+                    handleResampleMessage(msg);
                 }
                 break;
         }
@@ -3085,4 +3210,697 @@ function formatTime(seconds) {
     const sec = s % 60;
     if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
     return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+// ===== SEQUENCE CAPTURE =====
+
+const SEQ_PROFILE_META = {
+    wide_annotation: { label: 'Wide', purposeLabel: 'Annotation Context', short: 'W' },
+    medium_reid: { label: 'Medium', purposeLabel: 'ReID Training', short: 'M' },
+    closeup_reid: { label: 'Close-up', purposeLabel: 'ReID Training', short: 'C' },
+};
+
+// Typical La Liga broadcast averages for estimation
+const SEQ_BROADCAST_AVG = { wide: 7, medium: 12, closeup: 8 };
+
+function renderSequenceProfileCards() {
+    const container = document.getElementById('sequence-profile-cards');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const profiles = state.sequenceProfiles;
+    if (!profiles || Object.keys(profiles).length === 0) {
+        document.getElementById('sequence-config-section').style.display = 'none';
+        return;
+    }
+    document.getElementById('sequence-config-section').style.display = '';
+
+    for (const [name, prof] of Object.entries(profiles)) {
+        const meta = SEQ_PROFILE_META[name] || { label: name, purposeLabel: prof.purpose || '', short: '?' };
+        const enabled = prof.enabled !== false;
+
+        const card = document.createElement('div');
+        card.className = `seq-profile-card${enabled ? '' : ' disabled'}`;
+        card.innerHTML = `
+            <div class="seq-card-header">
+                <span class="seq-card-label">${meta.label} <span class="seq-card-purpose">(${meta.purposeLabel})</span></span>
+                <label class="seq-toggle">
+                    <input type="checkbox" ${enabled ? 'checked' : ''}
+                           onchange="toggleSequenceProfile('${name}', this.checked)" />
+                    <span class="seq-toggle-slider"></span>
+                </label>
+            </div>
+            <div class="seq-card-params${enabled ? '' : ' hidden'}">
+                <div class="seq-param-row">
+                    <label>Duration:
+                        <input type="number" class="seq-input" value="${prof.duration_sec}"
+                               step="0.5" min="1" max="60"
+                               onchange="updateSequenceParam('${name}', 'duration_sec', parseFloat(this.value))" />s
+                    </label>
+                    <label>Interval:
+                        <input type="number" class="seq-input" value="${prof.interval_sec}"
+                               step="0.1" min="0.1" max="10"
+                               onchange="updateSequenceParam('${name}', 'interval_sec', parseFloat(this.value))" />s
+                    </label>
+                </div>
+            </div>
+        `;
+        container.appendChild(card);
+    }
+
+    updateSequenceEstimate();
+    renderSequenceAdvanced();
+}
+
+function toggleSequenceProfile(name, enabled) {
+    if (state.sequenceProfiles[name]) {
+        state.sequenceProfiles[name].enabled = enabled;
+    }
+    renderSequenceProfileCards();
+}
+
+function updateSequenceParam(name, param, value) {
+    if (state.sequenceProfiles[name]) {
+        state.sequenceProfiles[name][param] = value;
+    }
+    updateSequenceEstimate();
+}
+
+function updateSequenceEstimate() {
+    const el = document.getElementById('seq-estimate');
+    if (!el) return;
+
+    const profiles = state.sequenceProfiles;
+    let minFrames = 0, maxFrames = 0;
+    let apiCost = 0;
+
+    for (const [name, prof] of Object.entries(profiles)) {
+        if (!prof.enabled) continue;
+
+        const seqsPerMatch = name.includes('wide') ? SEQ_BROADCAST_AVG.wide
+            : name.includes('medium') ? SEQ_BROADCAST_AVG.medium
+            : SEQ_BROADCAST_AVG.closeup;
+
+        const framesPerSeq = Math.ceil(prof.duration_sec / prof.interval_sec);
+        const estimated = seqsPerMatch * framesPerSeq;
+        minFrames += Math.floor(estimated * 0.6);
+        maxFrames += Math.ceil(estimated * 1.4);
+
+        if (!prof.skip_classifier_during_capture) {
+            apiCost += estimated * state.costPerFrame;
+        }
+    }
+
+    if (minFrames === 0) {
+        el.textContent = '';
+        return;
+    }
+
+    let text = `Est. additional frames/match: ~${minFrames}-${maxFrames}`;
+    text += ` \u00b7 Est. additional API cost: ${apiCost > 0 ? '$' + apiCost.toFixed(3) : '$0.00 (classifier skip)'}`;
+    el.textContent = text;
+}
+
+function toggleSequenceAdvanced() {
+    const panel = document.getElementById('seq-advanced-panel');
+    const toggle = document.getElementById('seq-advanced-toggle');
+    if (panel.style.display === 'none') {
+        panel.style.display = '';
+        toggle.innerHTML = '&#9660; Advanced Sequence Settings';
+    } else {
+        panel.style.display = 'none';
+        toggle.innerHTML = '&#9654; Advanced Sequence Settings';
+    }
+}
+
+function renderSequenceAdvanced() {
+    const container = document.getElementById('seq-advanced-content');
+    if (!container) return;
+    container.innerHTML = '';
+
+    for (const [name, prof] of Object.entries(state.sequenceProfiles)) {
+        const meta = SEQ_PROFILE_META[name] || { label: name };
+        const triggers = (prof.trigger || []).join(', ');
+
+        const div = document.createElement('div');
+        div.className = 'seq-advanced-group';
+        div.innerHTML = `
+            <div class="seq-advanced-label">${meta.label}:</div>
+            <div class="seq-advanced-params">
+                <label>Tolerance:
+                    <input type="number" class="seq-input" value="${prof.tolerance_sec}"
+                           step="0.5" min="0.1" max="10"
+                           onchange="updateSequenceParam('${name}', 'tolerance_sec', parseFloat(this.value))" />s
+                </label>
+                <label>Cooldown:
+                    <input type="number" class="seq-input" value="${prof.cooldown_sec}"
+                           step="1" min="1" max="120"
+                           onchange="updateSequenceParam('${name}', 'cooldown_sec', parseFloat(this.value))" />s
+                </label>
+            </div>
+            <div class="seq-advanced-triggers">
+                Triggers: <input type="text" class="seq-trigger-input" value="${triggers}"
+                                 onchange="updateSequenceTriggers('${name}', this.value)" />
+            </div>
+            <label class="seq-advanced-check">
+                <input type="checkbox" ${prof.skip_classifier_during_capture ? 'checked' : ''}
+                       onchange="updateSequenceParam('${name}', 'skip_classifier_during_capture', this.checked)" />
+                Skip classifier during capture
+            </label>
+        `;
+        container.appendChild(div);
+    }
+}
+
+function updateSequenceTriggers(name, value) {
+    if (state.sequenceProfiles[name]) {
+        state.sequenceProfiles[name].trigger = value.split(',').map(s => s.trim()).filter(Boolean);
+    }
+}
+
+function resetSequenceDefaults() {
+    state.sequenceProfiles = JSON.parse(JSON.stringify(state.sequenceDefaults));
+    renderSequenceProfileCards();
+}
+
+function getSequenceProfilesForCapture() {
+    const profiles = state.sequenceProfiles;
+    if (!profiles || Object.keys(profiles).length === 0) return null;
+    if (!Object.values(profiles).some(p => p.enabled)) return null;
+    return profiles;
+}
+
+// ===== SEQUENCE DASHBOARD STATUS =====
+
+function initSequenceStatusPanel() {
+    const container = document.getElementById('seq-status-rows');
+    if (!container) return;
+    container.innerHTML = '';
+
+    for (const [name, prof] of Object.entries(state.sequenceProfiles)) {
+        if (!prof.enabled) continue;
+        const meta = SEQ_PROFILE_META[name] || { label: name, short: '?' };
+        const row = document.createElement('div');
+        row.className = 'seq-status-row';
+        row.id = `seq-row-${name}`;
+        row.innerHTML = `
+            <span class="seq-indicator idle" id="seq-ind-${name}"></span>
+            <span class="seq-label">${meta.label}:</span>
+            <span class="seq-state-text" id="seq-state-${name}">IDLE</span>
+            <span class="seq-detail" id="seq-detail-${name}"></span>
+        `;
+        container.appendChild(row);
+    }
+
+    document.getElementById('seq-session-totals').textContent = '';
+}
+
+function updateSequenceStatusUI(msg) {
+    const panel = document.getElementById('seq-status-panel');
+    if (!panel || panel.style.display === 'none') return;
+
+    const name = msg.profile;
+    const stateText = document.getElementById(`seq-state-${name}`);
+    const indicator = document.getElementById(`seq-ind-${name}`);
+    const detail = document.getElementById(`seq-detail-${name}`);
+    if (!stateText) return;
+
+    const s = msg.state;
+    stateText.textContent = s;
+
+    // Update indicator
+    if (indicator) {
+        indicator.className = 'seq-indicator ' + s.toLowerCase();
+    }
+
+    // Update detail text
+    if (detail) {
+        if (s === 'CAPTURING') {
+            const elapsed = msg.elapsed != null ? `${msg.elapsed.toFixed(1)}s` : '';
+            const frames = msg.frames != null ? `${msg.frames}fr` : '';
+            const seqId = msg.sequence_id || '';
+            detail.textContent = `${elapsed} | ${seqId} | ${frames}`;
+
+            // Add progress bar within row
+            if (msg.duration_sec && msg.elapsed != null) {
+                const pct = Math.min(100, (msg.elapsed / msg.duration_sec) * 100);
+                const row = document.getElementById(`seq-row-${name}`);
+                if (row) {
+                    let bar = row.querySelector('.seq-progress-bar');
+                    if (!bar) {
+                        bar = document.createElement('div');
+                        bar.className = 'seq-progress-bar';
+                        bar.innerHTML = '<div class="seq-progress-fill"></div>';
+                        row.appendChild(bar);
+                    }
+                    bar.querySelector('.seq-progress-fill').style.width = `${pct}%`;
+                }
+            }
+        } else if (s === 'COOLDOWN') {
+            detail.textContent = msg.remaining != null ? `${msg.remaining.toFixed(0)}s` : '';
+            // Remove progress bar
+            const row = document.getElementById(`seq-row-${name}`);
+            if (row) {
+                const bar = row.querySelector('.seq-progress-bar');
+                if (bar) bar.remove();
+            }
+        } else {
+            detail.textContent = '';
+            const row = document.getElementById(`seq-row-${name}`);
+            if (row) {
+                const bar = row.querySelector('.seq-progress-bar');
+                if (bar) bar.remove();
+            }
+        }
+    }
+}
+
+function updateSequenceSummaryUI(msg) {
+    const el = document.getElementById('seq-session-totals');
+    if (!el) return;
+
+    const parts = [];
+    if (msg.wide) parts.push(`${msg.wide.count}W(${msg.wide.frames}fr)`);
+    if (msg.med) parts.push(`${msg.med.count}M(${msg.med.frames}fr)`);
+    if (msg.close) parts.push(`${msg.close.count}C(${msg.close.frames}fr)`);
+
+    el.textContent = parts.length > 0 ? `Session: ${parts.join(' \u00b7 ')}` : '';
+}
+
+// ===== RESAMPLE MODE =====
+
+function showResampleImport() {
+    document.getElementById('resample-import-modal').style.display = 'flex';
+    document.getElementById('resample-import-path').value = '';
+    document.getElementById('resample-import-path').focus();
+}
+
+function hideResampleImport() {
+    document.getElementById('resample-import-modal').style.display = 'none';
+}
+
+async function importResampleFile() {
+    const filePath = document.getElementById('resample-import-path').value.trim();
+    if (!filePath) {
+        alert('Please enter the path to the resample_request.json file.');
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/resample/import', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({file_path: filePath}),
+        });
+        const data = await res.json();
+        if (data.status === 'error') {
+            alert(data.message);
+            return;
+        }
+
+        hideResampleImport();
+        await loadResampleTasks();
+
+        // Open the plan view for this task
+        openResamplePlan(data.task_id);
+    } catch (e) {
+        console.error('Import resample error:', e);
+        alert('Failed to import resample file.');
+    }
+}
+
+async function loadResampleTasks() {
+    try {
+        const tasks = await fetch('/api/resample/tasks').then(r => r.json());
+        state.resampleTasks = tasks;
+        renderResampleTasks();
+    } catch (e) {
+        console.error('Load resample tasks error:', e);
+    }
+}
+
+function renderResampleTasks() {
+    const section = document.getElementById('resample-tasks-section');
+    const list = document.getElementById('resample-task-list');
+    if (!list) return;
+
+    if (state.resampleTasks.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+
+    section.style.display = '';
+    list.innerHTML = state.resampleTasks.map(task => {
+        const match = task.matched_match;
+        const label = match ? match.opponent : (task.match_id || 'Unknown');
+        const statusClass = task.status === 'running' ? 'status-running' :
+                           task.status === 'completed' ? 'status-complete' : '';
+        const enabledCount = task.targets.filter(t => t.enabled !== false).length;
+        return `<div class="resample-task-row" onclick="openResamplePlan('${task.id}')">
+            <span class="resample-task-icon">&#8635;</span>
+            <span class="resample-task-label">${label}</span>
+            <span class="resample-task-targets">${enabledCount} targets</span>
+            <span class="resample-task-status ${statusClass}">${task.status}</span>
+            <button class="btn-icon-delete" onclick="event.stopPropagation();deleteResampleTask('${task.id}')" title="Delete task">&#10005;</button>
+        </div>`;
+    }).join('');
+}
+
+async function deleteResampleTask(taskId) {
+    if (!confirm('Delete this resample task?')) return;
+    try {
+        const res = await fetch(`/api/resample/tasks/${taskId}`, {method: 'DELETE'});
+        const data = await res.json();
+        if (data.status === 'error') { alert(data.message); return; }
+
+        state.resampleTasks = state.resampleTasks.filter(t => t.id !== taskId);
+        renderResampleTasks();
+    } catch (e) {
+        console.error('Delete resample task error:', e);
+    }
+}
+
+function openResamplePlan(taskId) {
+    state.activeResampleTaskId = taskId;
+    showView('resample-plan');
+    loadResamplePlan();
+}
+
+async function loadResamplePlan() {
+    const taskId = state.activeResampleTaskId;
+    if (!taskId) return;
+
+    try {
+        const task = await fetch(`/api/resample/tasks/${taskId}`).then(r => r.json());
+        if (task.status === 'error') {
+            alert(task.message);
+            showView('library');
+            return;
+        }
+
+        const match = task.matched_match;
+        const title = match ? `Resample: ${match.opponent}` : `Resample: ${task.match_id || 'Unknown'}`;
+        document.getElementById('resample-plan-title').textContent = title;
+        document.getElementById('resample-plan-subtitle').textContent =
+            match ? `${match.date || ''} \u00b7 ${task.targets.length} targets from ${task.file_path.split('/').pop()}` : task.file_path;
+
+        // Settings
+        document.getElementById('resample-interval').value = task.settings.interval || 0.3;
+        document.getElementById('resample-seek-buffer').value = task.settings.seek_buffer || 2.0;
+
+        // Render targets table
+        renderResamplePlanTargets(task.targets);
+        updateResampleEstimate();
+    } catch (e) {
+        console.error('Load resample plan error:', e);
+    }
+}
+
+function renderResamplePlanTargets(targets) {
+    const tbody = document.getElementById('resample-target-tbody');
+    tbody.innerHTML = '';
+
+    targets.forEach((t, i) => {
+        const enabled = t.enabled !== false;
+        const duration = (t.video_time_end - t.video_time_start).toFixed(1);
+        const interval = parseFloat(document.getElementById('resample-interval').value) || 0.3;
+        const estFrames = Math.ceil((t.video_time_end - t.video_time_start) / interval);
+
+        const fmtTime = (s) => {
+            const m = Math.floor(s / 60);
+            const sec = (s % 60).toFixed(1);
+            return `${m}:${sec.padStart(4, '0')}`;
+        };
+
+        const tr = document.createElement('tr');
+        if (!enabled) tr.style.opacity = '0.4';
+        tr.innerHTML = `
+            <td><input type="checkbox" class="resample-target-cb" data-index="${i}" ${enabled ? 'checked' : ''} onchange="toggleResampleTarget(${i}, this.checked)" /></td>
+            <td>${t.player_name || '-'}</td>
+            <td>${t.camera_type || '-'}</td>
+            <td class="col-num">${fmtTime(t.video_time_start)}</td>
+            <td class="col-num">${fmtTime(t.video_time_end)}</td>
+            <td class="col-num">${estFrames}</td>
+            <td style="font-size:12px;color:var(--text-tertiary)">${t.reason || ''}</td>
+            <td><button class="btn-icon-delete" onclick="event.stopPropagation();deleteResampleTarget(${i})" title="Remove target">&#10005;</button></td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    document.getElementById('resample-target-count').textContent =
+        `(${targets.filter(t => t.enabled !== false).length} of ${targets.length} enabled)`;
+}
+
+async function toggleResampleTarget(index, enabled) {
+    const taskId = state.activeResampleTaskId;
+    const task = state.resampleTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    task.targets[index].enabled = enabled;
+
+    // Update on server
+    await fetch(`/api/resample/tasks/${taskId}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({targets: task.targets}),
+    });
+
+    renderResamplePlanTargets(task.targets);
+    updateResampleEstimate();
+}
+
+function toggleAllResampleTargets(checked) {
+    const taskId = state.activeResampleTaskId;
+    const task = state.resampleTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    task.targets.forEach(t => t.enabled = checked);
+
+    fetch(`/api/resample/tasks/${taskId}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({targets: task.targets}),
+    });
+
+    renderResamplePlanTargets(task.targets);
+    updateResampleEstimate();
+}
+
+async function deleteResampleTarget(index) {
+    const taskId = state.activeResampleTaskId;
+    const task = state.resampleTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    const target = task.targets[index];
+    if (!target) return;
+
+    if (!confirm(`Remove target "${target.player_name || 'Unknown'}" (${target.camera_type || ''})?`)) return;
+
+    try {
+        const res = await fetch(`/api/resample/tasks/${taskId}/targets/${index}`, {method: 'DELETE'});
+        const data = await res.json();
+        if (data.status === 'error') { alert(data.message); return; }
+
+        task.targets.splice(index, 1);
+        renderResamplePlanTargets(task.targets);
+        updateResampleEstimate();
+
+        // Update subtitle count
+        const match = task.matched_match;
+        document.getElementById('resample-plan-subtitle').textContent =
+            match ? `${match.date || ''} \u00b7 ${task.targets.length} targets from ${task.file_path.split('/').pop()}` : task.file_path;
+
+        // If no targets left, go back to library
+        if (task.targets.length === 0) {
+            await fetch(`/api/resample/tasks/${taskId}`, {method: 'DELETE'});
+            state.resampleTasks = state.resampleTasks.filter(t => t.id !== taskId);
+            renderResampleTasks();
+            showView('library');
+        }
+    } catch (e) {
+        console.error('Delete target error:', e);
+    }
+}
+
+function updateResampleEstimate() {
+    const taskId = state.activeResampleTaskId;
+    const task = state.resampleTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    const interval = parseFloat(document.getElementById('resample-interval').value) || 0.3;
+    const enabled = task.targets.filter(t => t.enabled !== false);
+    let totalFrames = 0;
+    let totalDuration = 0;
+
+    enabled.forEach(t => {
+        const dur = t.video_time_end - t.video_time_start;
+        totalDuration += dur;
+        totalFrames += Math.ceil(dur / interval);
+    });
+
+    const summary = `${enabled.length} targets \u00b7 ~${totalFrames} frames \u00b7 ${totalDuration.toFixed(0)}s of video`;
+    document.getElementById('resample-plan-summary').textContent = summary;
+}
+
+async function startResample() {
+    const taskId = state.activeResampleTaskId;
+    if (!taskId) return;
+
+    // Update settings from form
+    const settings = {
+        interval: parseFloat(document.getElementById('resample-interval').value) || 0.3,
+        seek_buffer: parseFloat(document.getElementById('resample-seek-buffer').value) || 2.0,
+    };
+
+    await fetch(`/api/resample/tasks/${taskId}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({settings}),
+    });
+
+    try {
+        const res = await fetch(`/api/resample/tasks/${taskId}/start`, {method: 'POST'});
+        const data = await res.json();
+
+        if (data.status === 'error') {
+            alert(data.message);
+            return;
+        }
+
+        // Switch to dashboard
+        setupResampleDashboard(taskId);
+        showView('resample-dashboard');
+    } catch (e) {
+        console.error('Start resample error:', e);
+        alert('Failed to start resample.');
+    }
+}
+
+function setupResampleDashboard(taskId) {
+    const task = state.resampleTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    const match = task.matched_match;
+    const label = match ? match.opponent : (task.match_id || 'Unknown');
+    document.getElementById('resample-dash-meta').textContent = `${label} \u00b7 ${task.targets.filter(t => t.enabled !== false).length} targets`;
+
+    // Reset progress
+    document.getElementById('resample-target-progress').style.width = '0%';
+    document.getElementById('resample-overall-progress').style.width = '0%';
+    document.getElementById('resample-overall-pct').textContent = '0%';
+    document.getElementById('resample-overall-totals').textContent = '0 targets completed \u00b7 0 frames captured';
+    document.getElementById('resample-latest-img').src = '';
+    document.getElementById('resample-latest-info').textContent = '';
+    document.getElementById('resample-completion').style.display = 'none';
+    document.getElementById('resample-pause-btn').textContent = '\u23F8 Pause';
+}
+
+async function skipResampleTarget() {
+    const taskId = state.activeResampleTaskId;
+    if (!taskId) return;
+    await fetch(`/api/resample/tasks/${taskId}/skip`, {method: 'POST'});
+}
+
+async function pauseResample() {
+    const taskId = state.activeResampleTaskId;
+    if (!taskId) return;
+    const res = await fetch(`/api/resample/tasks/${taskId}/pause`, {method: 'POST'});
+    const data = await res.json();
+    const btn = document.getElementById('resample-pause-btn');
+    if (data.status === 'paused') {
+        btn.textContent = '\u25B6 Resume';
+    } else {
+        btn.textContent = '\u23F8 Pause';
+    }
+}
+
+async function stopResample() {
+    const taskId = state.activeResampleTaskId;
+    if (!taskId) return;
+    if (!confirm('Stop the resample? Captured frames will be saved.')) return;
+    await fetch(`/api/resample/tasks/${taskId}/stop`, {method: 'POST'});
+}
+
+function handleResampleMessage(msg) {
+    switch (msg.type) {
+        case 'resample_started':
+            break;
+
+        case 'resample_target_start':
+            document.getElementById('resample-target-label').textContent =
+                `Target ${msg.target_index + 1} / ${msg.total_targets}`;
+            document.getElementById('resample-target-detail').textContent =
+                `${msg.player_name || ''} \u00b7 ${msg.camera_type} \u00b7 ${msg.video_time_start.toFixed(1)}s - ${msg.video_time_end.toFixed(1)}s`;
+            document.getElementById('resample-target-progress').style.width = '0%';
+            document.getElementById('resample-target-frames').textContent = `0 / ~${msg.est_frames} frames`;
+            break;
+
+        case 'resample_frame': {
+            // Update target progress
+            const targetPct = Math.min(100, (msg.frame_in_target / msg.est_target_frames) * 100);
+            document.getElementById('resample-target-progress').style.width = `${targetPct}%`;
+            document.getElementById('resample-target-frames').textContent =
+                `${msg.frame_in_target} / ~${msg.est_target_frames} frames`;
+
+            // Update overall progress
+            const overallPct = Math.min(100, ((msg.targets_completed + targetPct / 100) / msg.total_targets) * 100);
+            document.getElementById('resample-overall-progress').style.width = `${overallPct}%`;
+            document.getElementById('resample-overall-pct').textContent = `${Math.round(overallPct)}%`;
+            document.getElementById('resample-overall-totals').textContent =
+                `${msg.targets_completed} targets completed \u00b7 ${msg.total_captured} frames captured`;
+
+            // Update thumbnail
+            if (msg.thumbnail_b64) {
+                document.getElementById('resample-latest-img').src = `data:image/jpeg;base64,${msg.thumbnail_b64}`;
+            }
+            document.getElementById('resample-latest-info').textContent =
+                `${msg.camera_type} @ ${msg.video_time.toFixed(1)}s`;
+            break;
+        }
+
+        case 'resample_target_complete':
+            document.getElementById('resample-target-progress').style.width = '100%';
+            document.getElementById('resample-target-progress').classList.add('complete');
+            setTimeout(() => {
+                document.getElementById('resample-target-progress').classList.remove('complete');
+            }, 500);
+            if (msg.total_targets) {
+                const pct = (msg.targets_completed / msg.total_targets) * 100;
+                document.getElementById('resample-overall-progress').style.width = `${pct}%`;
+                document.getElementById('resample-overall-pct').textContent = `${Math.round(pct)}%`;
+            }
+            document.getElementById('resample-overall-totals').textContent =
+                `${msg.targets_completed} targets completed \u00b7 ${msg.total_captured} frames captured`;
+            break;
+
+        case 'resample_completed':
+            document.getElementById('resample-overall-progress').style.width = '100%';
+            document.getElementById('resample-overall-progress').classList.add('complete');
+            document.getElementById('resample-overall-pct').textContent = '100%';
+
+            // Show completion card
+            const s = msg.summary || {};
+            document.getElementById('resample-completion').style.display = '';
+            document.getElementById('resample-completion-stats').innerHTML = `
+                <p>${s.targets_completed || 0} / ${s.total_targets || 0} targets completed</p>
+                <p>${s.total_frames || 0} frames captured</p>
+                <p>${s.duration_minutes || 0} minutes</p>
+                <p>Output: <span class="mono">${s.output_dir || ''}</span></p>
+            `;
+
+            // Update task status
+            if (state.activeResampleTaskId) {
+                const task = state.resampleTasks.find(t => t.id === state.activeResampleTaskId);
+                if (task) task.status = 'completed';
+            }
+            break;
+
+        case 'resample_status':
+            if (msg.status === 'paused') {
+                document.getElementById('resample-pause-btn').textContent = '\u25B6 Resume';
+            } else if (msg.status === 'capturing') {
+                document.getElementById('resample-pause-btn').textContent = '\u23F8 Pause';
+            }
+            break;
+    }
 }

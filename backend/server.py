@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,6 +20,7 @@ from backend.batch_manager import BatchManager
 from backend.stats_aggregator import StatsAggregator
 from backend.exporter import DatasetExporter
 from backend.annotation_exporter import AnnotationExporter
+from backend.resample_runner import ResampleRunner
 
 app = FastAPI(title="Footballia Screenshotter")
 
@@ -41,6 +42,9 @@ ws_clients: set[WebSocket] = set()
 state_store: dict = {}  # For pending generic web source
 navigator_instance: Optional[FootballiaNavigator] = None
 batch_manager: Optional[BatchManager] = None
+active_resample: Optional[ResampleRunner] = None
+resample_task_obj: Optional[asyncio.Task] = None
+resample_tasks: dict[str, dict] = {}
 
 
 # ── Pydantic models ──
@@ -82,6 +86,7 @@ class CaptureRequest(BaseModel):
     custom_ranges: list[dict] = []         # [{"start": "15:00", "end": "20:00"}, ...]
     local_filepath: str = ""               # For local_file source
     generic_web_url: str = ""              # For generic_web source
+    sequence_profiles: dict | None = None  # Sequence capture profile overrides
 
 
 async def broadcast(message: dict):
@@ -288,6 +293,7 @@ async def get_config():
         "sampling_interval": config["sampling"]["interval_seconds"],
         "camera_types": categories,
         "camera_descriptions": descriptions,
+        "sequence_profiles": config.get("sequence_profiles", {}),
     }
 
 
@@ -513,6 +519,7 @@ async def start_capture(body: CaptureRequest):
             goal_times=body.goal_times,
             goal_window=body.goal_window,
             custom_ranges=body.custom_ranges,
+            sequence_profiles=body.sequence_profiles,
         )
 
         pipeline_task = asyncio.create_task(active_pipeline.run())
@@ -569,6 +576,7 @@ async def confirm_video_playing():
         provider=body.provider,
         task_id=body.task_id,
         capture_mode=body.capture_mode,
+        sequence_profiles=body.sequence_profiles,
     )
 
     pipeline_task = asyncio.create_task(active_pipeline.run())
@@ -1228,6 +1236,421 @@ async def save_custom_task(body: dict):
         return {"error": "Validation failed", "details": errors}
     path = tm.save_custom_task(body)
     return {"status": "ok", "path": path}
+
+
+# ── Sequence capture routes ──
+
+@app.get("/api/sequence/profiles")
+async def get_sequence_profiles():
+    """Return current sequence profile configurations."""
+    config = load_config()
+    seq = config.get("sequence_profiles", {})
+
+    # If pipeline is running, return its live config
+    if active_pipeline and active_pipeline.sequence_dispatcher:
+        seq = active_pipeline.sequence_dispatcher.get_profiles_config()
+
+    return seq
+
+
+@app.put("/api/sequence/profiles")
+async def update_sequence_profiles(body: dict):
+    """Update sequence profile configurations from frontend."""
+    # Update the live dispatcher if pipeline is running
+    if active_pipeline and active_pipeline.sequence_dispatcher:
+        active_pipeline.sequence_dispatcher.update_profiles(body)
+
+    return {"status": "ok"}
+
+
+@app.get("/api/sequence/status")
+async def get_sequence_status():
+    """Return current FSM states for all profiles."""
+    if active_pipeline and active_pipeline.sequence_dispatcher:
+        return active_pipeline.sequence_dispatcher.get_all_status()
+    return {}
+
+
+@app.get("/api/sequence/summary")
+async def get_sequence_summary():
+    """Return session totals for sequence captures."""
+    if active_pipeline and active_pipeline.sequence_dispatcher:
+        return active_pipeline.sequence_dispatcher.get_session_summary()
+    return {}
+
+
+# ── File browse ──
+
+class BrowseFileRequest(BaseModel):
+    title: str = "Select a file"
+    filetypes: list[list[str]] = []  # e.g. [["JSON files", "*.json"]]
+    initial_dir: str = ""
+
+
+@app.post("/api/browse-file")
+async def browse_file(body: BrowseFileRequest):
+    """Open a native file picker dialog and return the selected path."""
+    import subprocess, platform, sys
+
+    system = platform.system()
+
+    if system == "Darwin":
+        # macOS: use osascript to open native Finder dialog
+        # Build file type filter from extensions (e.g. "*.json" -> "json")
+        # On newer macOS (Ventura+), `choose file of type` requires UTI
+        # strings — plain extensions alone may not match.  Include both
+        # the extension and the UTI so the dialog works on all versions.
+        _EXT_TO_UTI = {
+            "json": "public.json",
+            "txt": "public.plain-text",
+            "csv": "public.comma-separated-values-text",
+            "xlsx": "org.openxmlformats.spreadsheetml.sheet",
+            "xls": "com.microsoft.excel.xls",
+            "mp4": "public.mpeg-4",
+            "mov": "com.apple.quicktime-movie",
+            "avi": "public.avi",
+            "mkv": "public.mkv",
+            "webm": "org.webmproject.webm",
+            "ts": "public.mpeg-2-transport-stream",
+            "png": "public.png",
+            "jpg": "public.jpeg",
+            "jpeg": "public.jpeg",
+        }
+        type_list = []
+        for ft in body.filetypes:
+            if len(ft) >= 2:
+                # ft[1] is like "*.json" or "*.mp4 *.mkv *.avi"
+                for ext in ft[1].split():
+                    ext_clean = ext.lstrip("*.")
+                    if ext_clean:
+                        type_list.append(f'"{ext_clean}"')
+                        uti = _EXT_TO_UTI.get(ext_clean.lower())
+                        if uti:
+                            type_list.append(f'"{uti}"')
+
+        # 'activate' brings the dialog to front above the browser window
+        script_parts = ['activate\n']
+        script_parts.append('set chosenFile to POSIX path of (choose file')
+        script_parts.append(f' with prompt "{body.title}"')
+        if type_list:
+            script_parts.append(f' of type {{{", ".join(type_list)}}}')
+        if body.initial_dir:
+            script_parts.append(f' default location POSIX file "{body.initial_dir}"')
+        script_parts.append(')')
+        script = "".join(script_parts)
+
+        try:
+            result = await asyncio.create_subprocess_exec(
+                "osascript", "-e", script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await result.communicate()
+            if result.returncode == 0 and stdout:
+                selected = stdout.decode().strip()
+                return {"status": "ok", "path": selected}
+            else:
+                # User cancelled or error
+                return {"status": "cancelled", "path": ""}
+        except Exception as e:
+            logger.warning(f"File browse failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    elif system == "Linux":
+        # Linux: use zenity
+        cmd = ["zenity", "--file-selection", f"--title={body.title}"]
+        try:
+            result = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await result.communicate()
+            if result.returncode == 0 and stdout:
+                return {"status": "ok", "path": stdout.decode().strip()}
+            return {"status": "cancelled", "path": ""}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    else:
+        return {"status": "error", "message": f"File browsing not supported on {system}"}
+
+
+@app.post("/api/upload-temp")
+async def upload_temp(file: UploadFile):
+    """Save uploaded file to a temp location and return the server-side path.
+    Used as fallback when native file picker (osascript) is unavailable."""
+    import tempfile
+    suffix = Path(file.filename).suffix if file.filename else ""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="screenshotter_")
+    content = await file.read()
+    tmp.write(content)
+    tmp.close()
+    return {"status": "ok", "path": tmp.name, "filename": file.filename}
+
+
+# ── Resample routes ──
+
+class ResampleImportRequest(BaseModel):
+    file_path: str
+
+
+@app.post("/api/resample/import")
+async def import_resample(body: ResampleImportRequest):
+    """Import a resample_request.json file and create a resample task."""
+    import uuid as _uuid
+
+    file_path = Path(body.file_path)
+    if not file_path.exists():
+        return {"status": "error", "message": f"File not found: {body.file_path}"}
+
+    try:
+        with open(file_path) as f:
+            data = json.load(f)
+    except Exception as e:
+        return {"status": "error", "message": f"Invalid JSON: {e}"}
+
+    # Extract match info from the resample request.
+    # Support both nested format (match_info.match_url) and flat format.
+    match_info = data.get("match_info", {})
+    match_url = match_info.get("match_url", "") or data.get("match_url", "")
+    match_id_str = match_info.get("match_id", "") or data.get("match_id", "")
+
+    # Support both "resample_targets" (annotation-tool export) and "targets"
+    raw_targets = data.get("resample_targets", []) or data.get("targets", [])
+
+    # Flatten nested format (annotation-tool export) into the flat format
+    # expected by ResampleRunner and the frontend.
+    # Nested format: each entry has "target_player" + "sequences" list
+    # Flat format: each entry has player_name, video_time_start, etc.
+    targets: list[dict] = []
+    if raw_targets and "target_player" in raw_targets[0]:
+        for rt in raw_targets:
+            player = rt.get("target_player", {})
+            player_name = player.get("name", "Unknown")
+            jersey = player.get("jersey_number", "")
+            for seq in rt.get("sequences", []):
+                targets.append({
+                    "player_name": player_name,
+                    "jersey_number": jersey,
+                    "camera_type": seq.get("camera_angle", "UNKNOWN"),
+                    "video_time_start": seq.get("video_time_start", 0),
+                    "video_time_end": seq.get("video_time_end", 0),
+                    "original_sequence_id": seq.get("sequence_id", ""),
+                    "original_interval": seq.get("original_interval_sec", 0.5),
+                    "reason": seq.get("sequence_type", "annotation_gap"),
+                    "expected_new_frames": seq.get("expected_new_frames", 0),
+                    "enabled": True,
+                })
+    else:
+        # Already flat format — use as-is
+        targets = raw_targets
+
+    if not targets:
+        return {"status": "error", "message": "No targets found in resample request"}
+
+    # Try to match against library by URL, then by match_id folder name
+    db = MatchDB()
+    all_matches = db.get_all_matches()
+    db.close()
+
+    matched_match = None
+    if match_url:
+        for m in all_matches:
+            if m.get("footballia_url") == match_url:
+                matched_match = m
+                break
+
+    if not matched_match and match_id_str:
+        for m in all_matches:
+            md = int(m.get("md", 0))
+            opponent = (m.get("opponent", "Unknown")).replace(" ", "_")
+            date = m.get("date", "unknown")
+            folder = f"MD{md:02d}_{opponent}_{date}"
+            if folder == match_id_str:
+                matched_match = m
+                break
+
+    # Build task
+    task_id = str(_uuid.uuid4())[:8]
+    task = {
+        "id": task_id,
+        "status": "pending",
+        "file_path": str(file_path),
+        "match_url": match_url,
+        "match_id": match_id_str,
+        "matched_match": matched_match,
+        "targets": targets,
+        "settings": {
+            "interval": (data.get("generation_settings", {}).get("estimated_resample_interval")
+                         or data.get("settings", {}).get("interval", 0.3)),
+            "seek_buffer": data.get("settings", {}).get("seek_buffer", 2.0),
+        },
+        "created_at": time.time(),
+    }
+    resample_tasks[task_id] = task
+
+    return {
+        "status": "ok",
+        "task_id": task_id,
+        "match_found": matched_match is not None,
+        "match_label": matched_match.get("opponent", "") if matched_match else None,
+        "target_count": len(targets),
+    }
+
+
+@app.get("/api/resample/tasks")
+async def get_resample_tasks():
+    """Return all resample tasks."""
+    return list(resample_tasks.values())
+
+
+@app.get("/api/resample/tasks/{task_id}")
+async def get_resample_task(task_id: str):
+    """Return detail for a single resample task."""
+    task = resample_tasks.get(task_id)
+    if not task:
+        return {"status": "error", "message": "Task not found"}
+    # Merge live status if this task is actively running
+    if active_resample and active_resample.task_id == task_id:
+        task["live_status"] = active_resample.get_status()
+    return task
+
+
+@app.put("/api/resample/tasks/{task_id}")
+async def update_resample_task(task_id: str, body: dict):
+    """Update settings or toggle targets for a resample task."""
+    task = resample_tasks.get(task_id)
+    if not task:
+        return {"status": "error", "message": "Task not found"}
+
+    if "settings" in body:
+        task["settings"].update(body["settings"])
+    if "targets" in body:
+        task["targets"] = body["targets"]
+    return {"status": "ok"}
+
+
+@app.delete("/api/resample/tasks/{task_id}")
+async def delete_resample_task(task_id: str):
+    """Delete a resample task entirely."""
+    if task_id not in resample_tasks:
+        return {"status": "error", "message": "Task not found"}
+    # Don't allow deleting a running task
+    if active_resample and active_resample.task_id == task_id and active_resample.status == "capturing":
+        return {"status": "error", "message": "Cannot delete a running task. Stop it first."}
+    del resample_tasks[task_id]
+    return {"status": "ok"}
+
+
+@app.delete("/api/resample/tasks/{task_id}/targets/{target_index}")
+async def delete_resample_target(task_id: str, target_index: int):
+    """Delete a single target from a resample task by index."""
+    task = resample_tasks.get(task_id)
+    if not task:
+        return {"status": "error", "message": "Task not found"}
+    if target_index < 0 or target_index >= len(task["targets"]):
+        return {"status": "error", "message": "Target index out of range"}
+    task["targets"].pop(target_index)
+    return {"status": "ok", "remaining": len(task["targets"])}
+
+
+@app.post("/api/resample/tasks/{task_id}/start")
+async def start_resample(task_id: str):
+    """Start executing a resample task."""
+    global active_resample, resample_task_obj
+
+    if active_pipeline and active_pipeline.status == "capturing":
+        return {"status": "error", "message": "A capture is already in progress"}
+    if active_resample and active_resample.status == "capturing":
+        return {"status": "error", "message": "A resample is already in progress"}
+
+    task = resample_tasks.get(task_id)
+    if not task:
+        return {"status": "error", "message": "Task not found"}
+
+    match = task.get("matched_match") or {}
+    targets = [t for t in task["targets"] if t.get("enabled", True)]
+
+    if not targets:
+        return {"status": "error", "message": "No enabled targets"}
+
+    # Determine match URL
+    match_url = task.get("match_url", "") or match.get("footballia_url", "")
+    if not match_url:
+        return {"status": "error", "message": "No match URL available. Add a Footballia URL to the matched library entry."}
+
+    try:
+        config = load_config()
+
+        # Create source — use Footballia source
+        from backend.sources.footballia import FootballiaSource
+        source = FootballiaSource(config.get("browser", {}))
+        success = await source.setup(url=match_url, broadcast_fn=broadcast)
+        if not success:
+            return {"status": "error", "message": "Failed to connect to video"}
+
+        # Create output manager
+        from backend.output_manager import OutputManager
+        output = OutputManager(match=match, base_dir="recordings")
+
+        active_resample = ResampleRunner(
+            source=source,
+            match=match,
+            targets=targets,
+            settings=task["settings"],
+            broadcast_fn=broadcast,
+            output_manager=output,
+            task_id=task_id,
+            resample_source_match=task.get("match_id", ""),
+            resample_request_file=task.get("file_path", ""),
+        )
+
+        task["status"] = "running"
+        resample_task_obj = asyncio.create_task(active_resample.run())
+        logger.info(f"Resample started: task={task_id}, targets={len(targets)}")
+
+        return {"status": "started", "target_count": len(targets)}
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Resample start failed: {e}\n{traceback.format_exc()}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/resample/tasks/{task_id}/pause")
+async def pause_resample(task_id: str):
+    """Pause/resume a running resample."""
+    if not active_resample or active_resample.task_id != task_id:
+        return {"status": "error", "message": "No active resample for this task"}
+
+    if active_resample.status == "paused":
+        active_resample.resume()
+        return {"status": "resumed"}
+    else:
+        active_resample.pause()
+        return {"status": "paused"}
+
+
+@app.post("/api/resample/tasks/{task_id}/stop")
+async def stop_resample(task_id: str):
+    """Stop a running resample."""
+    if not active_resample or active_resample.task_id != task_id:
+        return {"status": "error", "message": "No active resample for this task"}
+    active_resample.stop()
+    task = resample_tasks.get(task_id)
+    if task:
+        task["status"] = "completed"
+    return {"status": "stopped"}
+
+
+@app.post("/api/resample/tasks/{task_id}/skip")
+async def skip_resample_target(task_id: str):
+    """Skip the current target in a running resample."""
+    if not active_resample or active_resample.task_id != task_id:
+        return {"status": "error", "message": "No active resample for this task"}
+    active_resample.skip_target()
+    return {"status": "skipped"}
 
 
 # ── WebSocket ──

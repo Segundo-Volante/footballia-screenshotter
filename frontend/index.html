@@ -35,8 +35,11 @@
             </div>
             <div class="section">
                 <h3>Import existing Excel? <span class="hint-inline">(optional)</span></h3>
-                <p class="section-desc">If you have a match spreadsheet (.xlsx), enter the file path. You can also add matches manually later.</p>
-                <input type="text" id="setup-excel-path" placeholder="Path to .xlsx file  e.g. data/my_matches.xlsx" class="input-large" />
+                <p class="section-desc">If you have a match spreadsheet (.xlsx), select or enter the file path. You can also add matches manually later.</p>
+                <div class="input-with-browse">
+                    <input type="text" id="setup-excel-path" placeholder="Path to .xlsx file  e.g. data/my_matches.xlsx" class="input-large" />
+                    <button class="btn-browse" onclick="browseForFile('setup-excel-path', 'Select Excel file', [['Excel files','*.xlsx *.xls']], this)" title="Browse...">&#128193;</button>
+                </div>
             </div>
             <button class="btn-primary" onclick="completeSetup()">Get Started &#8594;</button>
         </div>
@@ -115,6 +118,7 @@
                     <!-- Populated by JS -->
                 </select>
                 <button class="btn-text btn-sm" onclick="toggleCollectionFilter()">&#128193; Collections</button>
+                <button class="btn-text btn-sm" onclick="showResampleImport()">&#8635; Import Resample</button>
             </div>
             <div class="search-bar">
                 <input type="text" id="match-search" placeholder="Search matches..." autocomplete="off" />
@@ -138,6 +142,10 @@
                 </table>
             </div>
             <p class="hint">Click a match to configure capture. Click the URL column to add/edit a Footballia URL.</p>
+            <div id="resample-tasks-section" class="resample-tasks-section" style="display:none;">
+                <h3 class="resample-section-header">&#8635; Resample Tasks</h3>
+                <div id="resample-task-list"></div>
+            </div>
             <div id="lib-batch-bar" class="lib-batch-bar" style="display:none;">
                 <span id="lib-batch-count">0 selected</span>
                 <button class="btn-secondary" onclick="deselectAllLibrary()">Clear</button>
@@ -203,13 +211,32 @@
             </div>
         </div>
 
+        <!-- ===== RESAMPLE IMPORT MODAL ===== -->
+        <div id="resample-import-modal" class="modal" style="display:none;">
+            <div class="modal-content">
+                <h3>&#8635; Import Resample Request</h3>
+                <p class="section-desc">Select or enter the path to a resample_request.json file from the Annotation Tool.</p>
+                <div class="input-with-browse">
+                    <input type="text" id="resample-import-path" placeholder="/path/to/resample_request.json" class="input-large" />
+                    <button class="btn-browse" onclick="browseForFile('resample-import-path', 'Select resample_request.json', [['JSON files','*.json']], this)" title="Browse...">&#128193;</button>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="hideResampleImport()">Cancel</button>
+                    <button class="btn-primary modal-primary" onclick="importResampleFile()">Import &#8594;</button>
+                </div>
+            </div>
+        </div>
+
         <!-- ===== LOCAL FILE MODAL ===== -->
         <div id="local-file-modal" class="modal" style="display:none;">
             <div class="modal-content">
                 <h3>&#128193; Local Video File</h3>
-                <p>Enter the path to a video file on your computer.</p>
+                <p>Select or enter the path to a video file on your computer.</p>
 
-                <input type="text" id="local-filepath" placeholder="/path/to/match.mp4" class="input-large" />
+                <div class="input-with-browse">
+                    <input type="text" id="local-filepath" placeholder="/path/to/match.mp4" class="input-large" />
+                    <button class="btn-browse" onclick="browseForFile('local-filepath', 'Select video file', [['Video files','*.mp4 *.mkv *.avi *.mov *.webm *.ts']], this)" title="Browse...">&#128193;</button>
+                </div>
 
                 <div class="quick-meta">
                     <input type="text" id="local-opponent" placeholder="Opponent name (optional)" class="input-medium" />
@@ -420,6 +447,26 @@
                 <input type="text" id="start-time-input" class="time-input" placeholder="MM:SS  e.g. 35:00" disabled />
             </div>
             <div class="divider"></div>
+
+            <!-- Sequence Capture Section -->
+            <div class="section" id="sequence-config-section">
+                <h3>Sequence Capture</h3>
+                <p class="section-desc">Continuous high-frequency capture triggered by specific camera angles.</p>
+
+                <div id="sequence-profile-cards"></div>
+
+                <div class="seq-advanced-toggle" id="seq-advanced-toggle" onclick="toggleSequenceAdvanced()">
+                    &#9654; Advanced Sequence Settings
+                </div>
+                <div class="seq-advanced-panel" id="seq-advanced-panel" style="display:none;">
+                    <div id="seq-advanced-content"></div>
+                    <button class="btn-text" onclick="resetSequenceDefaults()">Reset to Defaults</button>
+                </div>
+
+                <div class="seq-estimate" id="seq-estimate"></div>
+            </div>
+            <div class="divider"></div>
+
             <div class="summary-bar">
                 Total: <span class="mono" id="total-count">0</span> screenshots &middot;
                 Est. cost: <span class="mono" id="est-cost">$0.000</span> &middot;
@@ -480,6 +527,13 @@
                         <!-- Per-frame API responses populated by JS -->
                     </div>
                 </div>
+                <!-- Sequence Status Panel -->
+                <div class="seq-status-panel" id="seq-status-panel" style="display:none;">
+                    <h4>Sequences</h4>
+                    <div class="seq-status-rows" id="seq-status-rows"></div>
+                    <div class="seq-session-totals" id="seq-session-totals"></div>
+                </div>
+
                 <div class="activity-log-section">
                     <h4>Activity log</h4>
                     <div class="activity-log" id="activity-log"></div>
@@ -862,7 +916,117 @@
             </div>
         </div>
 
+        <!-- ===== VIEW: RESAMPLE PLAN ===== -->
+        <div id="view-resample-plan" class="view">
+            <button class="back-btn" onclick="showView('library')">&#8592; Back to Library</button>
+            <div class="match-header">
+                <h2 id="resample-plan-title">Resample Plan</h2>
+                <p class="match-date" id="resample-plan-subtitle"></p>
+            </div>
+
+            <div class="section">
+                <h3>Targets <span id="resample-target-count" class="hint-inline"></span></h3>
+                <div style="margin-bottom:8px;">
+                    <label class="radio-label" style="display:inline-flex;">
+                        <input type="checkbox" id="resample-toggle-all" onchange="toggleAllResampleTargets(this.checked)" checked />
+                        Select All
+                    </label>
+                </div>
+                <div class="table-wrap">
+                    <table class="match-table" id="resample-target-table">
+                        <thead>
+                            <tr>
+                                <th style="width:30px"></th>
+                                <th>Player</th>
+                                <th>Camera</th>
+                                <th class="col-num">Start</th>
+                                <th class="col-num">End</th>
+                                <th class="col-num">Est. Frames</th>
+                                <th>Reason</th>
+                                <th style="width:30px"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="resample-target-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Settings</h3>
+                <div class="resample-settings-grid">
+                    <label>Capture Interval (s)
+                        <input type="number" id="resample-interval" class="target-input" value="0.3" step="0.1" min="0.1" max="5" onchange="updateResampleEstimate()" />
+                    </label>
+                    <label>Seek Buffer (s)
+                        <input type="number" id="resample-seek-buffer" class="target-input" value="2.0" step="0.5" min="0" max="10" />
+                    </label>
+                </div>
+            </div>
+
+            <div class="summary-bar" id="resample-plan-summary"></div>
+
+            <div style="display:flex;gap:12px;">
+                <button class="btn-primary" style="flex:1;" onclick="startResample()">Start Resample &#8594;</button>
+                <button class="btn-secondary" onclick="showView('library')">Cancel</button>
+            </div>
+        </div>
+
+        <!-- ===== VIEW: RESAMPLE DASHBOARD ===== -->
+        <div id="view-resample-dashboard" class="view">
+            <div class="dash-header">
+                <h2>&#8635; Resample In Progress</h2>
+                <p class="dash-meta" id="resample-dash-meta"></p>
+            </div>
+
+            <!-- Current target info -->
+            <div class="resample-target-card" id="resample-current-target">
+                <div class="resample-target-label" id="resample-target-label">Target 1 / 5</div>
+                <div class="resample-target-detail" id="resample-target-detail"></div>
+                <div class="progress-bar-container large">
+                    <div class="progress-bar-fill" id="resample-target-progress" style="width:0%"></div>
+                </div>
+                <div class="resample-target-frames" id="resample-target-frames">0 / 0 frames</div>
+            </div>
+
+            <!-- Overall progress -->
+            <div class="overall-progress">
+                <div class="overall-pct" id="resample-overall-pct">0%</div>
+                <div class="progress-bar-container large">
+                    <div class="progress-bar-fill" id="resample-overall-progress" style="width:0%"></div>
+                </div>
+            </div>
+            <div class="dash-totals" id="resample-overall-totals">0 targets completed &middot; 0 frames captured</div>
+
+            <!-- Controls -->
+            <div class="dash-controls">
+                <button class="btn-pause" id="resample-pause-btn" onclick="pauseResample()">&#9208; Pause</button>
+                <button class="btn-text" onclick="skipResampleTarget()">&#9193; Skip Target</button>
+                <button class="btn-stop" onclick="stopResample()">&#9632; Stop</button>
+            </div>
+
+            <!-- Latest frame -->
+            <div class="latest-capture">
+                <h4>Latest Frame</h4>
+                <div class="latest-frame">
+                    <img id="resample-latest-img" src="" alt="" />
+                    <p id="resample-latest-info"></p>
+                </div>
+            </div>
+
+            <!-- Completion state (hidden until done) -->
+            <div id="resample-completion" class="completed-view" style="display:none;">
+                <div class="completed-header">
+                    <div class="completed-icon">&#10004;</div>
+                    <h2>Resample Complete</h2>
+                </div>
+                <div class="completed-stats" id="resample-completion-stats"></div>
+                <div class="completed-actions">
+                    <button class="btn-primary" onclick="showView('library')">Back to Library</button>
+                </div>
+            </div>
+        </div>
+
     </div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=2"></script>
 </body>
 </html>

@@ -15,6 +15,7 @@ from backend.pre_filter import PreFilter
 from backend.adaptive_sampler import AdaptiveSampler
 from backend.consistency_checker import ConsistencyChecker
 from backend.task_manager import TaskManager
+from backend.sequence_manager import SequenceDispatcher
 from backend.utils import logger, format_time, parse_time, get_active_categories
 
 
@@ -42,6 +43,7 @@ class Pipeline:
         goal_window: int = 30,
         db: Optional["MatchDB"] = None,
         custom_ranges: list[dict] = None,
+        sequence_profiles: Optional[dict] = None,
     ):
         self.source = source
         self.match = match
@@ -130,6 +132,14 @@ class Pipeline:
         # Consistency checker
         self.consistency = ConsistencyChecker()
 
+        # Sequence capture system
+        seq_config = sequence_profiles or config.get("sequence_profiles", {})
+        if seq_config and any(p.get("enabled", False) for p in seq_config.values()):
+            self.sequence_dispatcher = SequenceDispatcher(seq_config)
+            logger.info(f"Sequence capture enabled: {len(seq_config)} profiles")
+        else:
+            self.sequence_dispatcher = None
+
         self.interval = sampling.get("interval_seconds", 2.0)
         self.thumbnail_width = config["output"].get("thumbnail_width", 320)
 
@@ -161,6 +171,9 @@ class Pipeline:
         # Track last classification for adaptive sampler
         self._last_classification = None
         self._last_pre_filter = None
+
+        # Sequence capture tracking
+        self._sequence_saved_count = 0
 
         # API health tracking
         self._consecutive_errors = 0
@@ -269,11 +282,14 @@ class Pipeline:
             elif self.capture_mode == "custom_times" and self._custom_ranges:
                 await self._run_custom_times()
             else:
-                await asyncio.gather(
+                loops = [
                     self._capture_loop(),
                     self._classify_loop(),
                     self._broadcast_loop(),
-                )
+                ]
+                if self.sequence_dispatcher and self.sequence_dispatcher.has_any_enabled():
+                    loops.append(self._sequence_capture_loop())
+                await asyncio.gather(*loops)
 
         except Exception as e:
             logger.exception(f"Pipeline error: {e}")
@@ -288,10 +304,38 @@ class Pipeline:
                 except Exception:
                     pass
         finally:
+            # Final backfill for any sequences that ended during shutdown
+            if self.sequence_dispatcher:
+                for ended in self.sequence_dispatcher.pop_pending_backfills():
+                    self.output.backfill_sequence(
+                        sequence_id=ended.sequence_id,
+                        total_frames=ended.frame_count,
+                        video_time_end=ended.end_video_time or ended.start_video_time,
+                        truncated=ended.truncated,
+                        preempted_by=ended.preempted_by,
+                    )
+
             self.output.generate_metadata_csv()
             duration = time.time() - self._start_wall_time
             self._capture_duration = duration
-            self.output.generate_summary_json(self.classifier, duration)
+
+            # Get sequence records for summary and frame_metadata
+            seq_records = (
+                self.sequence_dispatcher.get_completed_sequences()
+                if self.sequence_dispatcher else None
+            )
+            self.output.generate_summary_json(self.classifier, duration, sequence_records=seq_records)
+
+            # Generate frame_metadata.json (primary data exchange with Annotation Tool)
+            seq_profiles_used = (
+                self.sequence_dispatcher.get_profiles_config()
+                if self.sequence_dispatcher else None
+            )
+            self.output.generate_frame_metadata_json(
+                match_url=self.match.get("footballia_url"),
+                sequence_profiles_used=seq_profiles_used,
+                sequence_records=seq_records,
+            )
 
             if self.status != "error":
                 self.status = "completed"
@@ -314,24 +358,29 @@ class Pipeline:
                     except Exception:
                         pass
 
+                summary_data = {
+                    "total_captured": total_captured,
+                    "total_target": total_target,
+                    "duration_minutes": round(duration / 60, 1),
+                    "api_cost": round(self.classifier.get_cost(), 6),
+                    "provider": self.provider,
+                    "output_dir": self.output.get_output_dir(),
+                    "counts": {
+                        cam: {
+                            "target": self.targets.get(cam, 0),
+                            "captured": self.saved_counts.get(cam, 0),
+                        }
+                        for cam in self.categories
+                    },
+                    "pre_filter_stats": self.pre_filter.get_stats(),
+                }
+                if self.sequence_dispatcher:
+                    summary_data["sequence_summary"] = self.sequence_dispatcher.get_session_summary()
+                    summary_data["sequence_frames"] = self._sequence_saved_count
+
                 await self.broadcast({
                     "type": "completed",
-                    "summary": {
-                        "total_captured": total_captured,
-                        "total_target": total_target,
-                        "duration_minutes": round(duration / 60, 1),
-                        "api_cost": round(self.classifier.get_cost(), 6),
-                        "provider": self.provider,
-                        "output_dir": self.output.get_output_dir(),
-                        "counts": {
-                            cam: {
-                                "target": self.targets.get(cam, 0),
-                                "captured": self.saved_counts.get(cam, 0),
-                            }
-                            for cam in self.categories
-                        },
-                        "pre_filter_stats": self.pre_filter.get_stats(),
-                    },
+                    "summary": summary_data,
                 })
 
                 # ── Generate annotation_ready/ package ──
@@ -588,6 +637,14 @@ class Pipeline:
             is_pending = classification.get("is_pending", False)
             logger.info(f"Frame #{self.total_classified_local}: {classified_as} (conf={conf:.2f})")
 
+            # ── Sequence dispatch ──
+            if self.sequence_dispatcher and not is_pending:
+                seq_events = self.sequence_dispatcher.on_classifier_result(
+                    classified_as, frame.video_time
+                )
+                for evt in seq_events:
+                    await self.broadcast(evt)
+
             # ── Consistency check ──
             scene_changed = (self._last_pre_filter or {}).get("scene_change", False)
             consistency = self.consistency.check(classified_as, scene_changed)
@@ -704,7 +761,165 @@ class Pipeline:
             if self.provider != "manual":
                 await self._broadcast_api_health()
 
+            # Broadcast sequence state updates
+            if self.sequence_dispatcher:
+                tick_events = self.sequence_dispatcher.tick()
+                for evt in tick_events:
+                    await self.broadcast(evt)
+
+                # Backfill metadata when sequences end
+                for ended in self.sequence_dispatcher.pop_pending_backfills():
+                    self.output.backfill_sequence(
+                        sequence_id=ended.sequence_id,
+                        total_frames=ended.frame_count,
+                        video_time_end=ended.end_video_time or ended.start_video_time,
+                        truncated=ended.truncated,
+                        preempted_by=ended.preempted_by,
+                    )
+
+                # Always send current state for all profiles
+                status = self.sequence_dispatcher.get_all_status()
+                for profile_name, profile_status in status.items():
+                    await self.broadcast({
+                        "type": "sequence_state",
+                        "profile": profile_name,
+                        **profile_status,
+                    })
+
             await asyncio.sleep(1)
+
+    async def _sequence_capture_loop(self):
+        """
+        Runs alongside the main capture/classify loops.
+        When a sequence FSM is in CAPTURING state, captures frames at the
+        profile's interval_sec, bypassing pre-filter and (optionally) classifier.
+        """
+        is_local = self.source.get_source_name() == "local_file"
+
+        while self.status in ("capturing", "paused"):
+            if self._stop_requested:
+                break
+
+            await self._pause_event.wait()
+
+            cap_profile = self.sequence_dispatcher.get_capturing_profile()
+
+            if not cap_profile or not cap_profile.should_capture_now():
+                # No active sequence or not time yet — sleep briefly
+                await asyncio.sleep(0.1)
+                continue
+
+            # Capture frame for sequence
+            jpeg_bytes = await self.source.capture_frame()
+            if not jpeg_bytes:
+                await asyncio.sleep(0.2)
+                continue
+
+            video_time = await self.source.get_current_time()
+            if not is_local and self.source.current_part > 1:
+                video_time += self.source.part1_duration
+
+            # Stall detection via pixel hash
+            pixel_hash = hash(jpeg_bytes[:1024])  # Quick hash of first KB
+            if self.sequence_dispatcher.check_stall(pixel_hash, cap_profile.name):
+                await asyncio.sleep(0.5)
+                continue
+
+            # Green ratio check when classifier is skipped
+            if cap_profile.skip_classifier_during_capture:
+                if not self.sequence_dispatcher.check_green_ratio(jpeg_bytes):
+                    logger.info(f"Sequence {cap_profile.current_sequence_id}: non-game frame detected, ending")
+                    # End sequence early
+                    events = self.sequence_dispatcher.on_video_ended()
+                    for evt in events:
+                        await self.broadcast(evt)
+                    continue
+
+            # Determine camera angle for this frame
+            if cap_profile.skip_classifier_during_capture:
+                # Inherit angle from trigger frame
+                classified_as = cap_profile.current_trigger_angle or "UNKNOWN"
+                classification = {
+                    "classified_as": classified_as,
+                    "confidence": 1.0,
+                    "is_pending": False,
+                }
+            else:
+                # Classifier running during capture — classify and let dispatcher handle preemption
+                classification = await self.classifier.classify_frame(jpeg_bytes)
+                classified_as = classification.get("classified_as", "OTHER")
+
+                # Feed result to dispatcher for preemption/tolerance checks
+                seq_events = self.sequence_dispatcher.on_classifier_result(
+                    classified_as, video_time
+                )
+                for evt in seq_events:
+                    await self.broadcast(evt)
+
+                # Check if this profile is still capturing after dispatcher processed
+                if cap_profile.state.value != "CAPTURING":
+                    continue
+
+            # Get sequence metadata for per-frame schema
+            seq_meta = self.sequence_dispatcher.get_sequence_metadata(cap_profile.name)
+
+            # Save frame with sequence metadata
+            filepath = await self.output.save_frame(
+                jpeg_bytes, video_time, classification, self.source.current_part,
+                sequence_meta=seq_meta,
+            )
+
+            # Also count in saved_counts (frame can be counted by both systems)
+            self.saved_counts[classified_as] = self.saved_counts.get(classified_as, 0) + 1
+            self._sequence_saved_count += 1
+
+            # Record in database
+            if self.capture_id and self.db:
+                try:
+                    self.db.record_frame(
+                        capture_id=self.capture_id,
+                        filename=filepath.name,
+                        filepath=str(filepath),
+                        video_time=video_time,
+                        video_part=self.source.current_part,
+                        classification=classification,
+                    )
+                except Exception as e:
+                    logger.debug(f"DB record_frame (sequence) failed: {e}")
+
+            # Update sequence frame count (with video_time for end_video_time tracking)
+            self.sequence_dispatcher.on_frame_captured(cap_profile.name, video_time)
+
+            # Broadcast the sequence frame
+            thumbnail_b64 = self._make_thumbnail(jpeg_bytes)
+            await self.broadcast({
+                "type": "frame_classified",
+                "filename": filepath.name,
+                "video_time": video_time,
+                "classified_as": classified_as,
+                "confidence": classification.get("confidence", 0),
+                "saved": True,
+                "thumbnail_b64": thumbnail_b64,
+                "sequence": seq_meta,
+            })
+
+            # Broadcast updated sequence state
+            state_evt = {
+                "type": "sequence_state",
+                "profile": cap_profile.name,
+                "state": "CAPTURING",
+                "sequence_id": cap_profile.current_sequence_id,
+                "elapsed": round(cap_profile.elapsed_capturing(), 1),
+                "frames": cap_profile.frame_count,
+                "duration_sec": cap_profile.duration_sec,
+            }
+            await self.broadcast(state_evt)
+
+        # Handle video end for active sequences
+        if self.sequence_dispatcher:
+            events = self.sequence_dispatcher.on_video_ended()
+            for evt in events:
+                await self.broadcast(evt)
 
     async def _run_goals_only(self):
         """

@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="screenshots/capture-dashboard.png" alt="Footballia Screenshotter — Live Capture Dashboard" width="700">
-</p>
-
 <h1 align="center">Footballia Screenshotter</h1>
 
 <p align="center">
@@ -10,12 +6,13 @@
 </p>
 
 <p align="center">
-  <a href="#-quick-start">Quick Start</a> &bull;
-  <a href="#-how-it-works">How It Works</a> &bull;
-  <a href="#-features">Features</a> &bull;
-  <a href="#-api-key-setup">API Keys</a> &bull;
-  <a href="#-export-formats">Export</a> &bull;
-  <a href="#-cost-estimate">Cost</a>
+  <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#how-it-works">How It Works</a> &bull;
+  <a href="#features">Features</a> &bull;
+  <a href="#api-key-setup">API Keys</a> &bull;
+  <a href="#export-formats">Export</a> &bull;
+  <a href="#cost-estimate">Cost</a> &bull;
+  <a href="#pre-alpha-changelog">Changelog</a>
 </p>
 
 ---
@@ -33,72 +30,6 @@ Whether you're building a computer vision model, studying tactical formations, o
 | **Footballia** | Free football archive — paste a URL and go |
 | **Local Files** | Your own `.mp4`, `.mkv`, `.avi` files |
 | **Streaming Sites** | ESPN+, Paramount+, YouTube *(under construction)* |
-
----
-
-## Screenshots
-
-> *Click any image to view full size.*
-
-### Home Screen
-Your command center. Everything starts here — access your match library, start a quick capture, browse matches by coach or player, or export your dataset.
-
-<p align="center">
-  <img src="screenshots/home-screen.png" alt="Home Screen" width="700">
-</p>
-
-### Match Library
-All your saved matches in one place. See dates, opponents, home/away status, and capture readiness at a glance. Click any match to configure and start capturing.
-
-<p align="center">
-  <img src="screenshots/match-library.png" alt="Match Library" width="700">
-</p>
-
-### Quick Capture
-Just paste a Footballia URL and hit go. No setup needed — uses smart defaults so you can start capturing immediately.
-
-<p align="center">
-  <img src="screenshots/quick-capture.png" alt="Quick Capture Dialog" width="450">
-</p>
-
-### Match Configuration
-Full control over every capture session. Choose your classification task, AI provider, capture mode, and set per-category screenshot targets.
-
-<p align="center">
-  <img src="screenshots/match-config-top.png" alt="Match Configuration — Task, Provider, and Capture Mode" width="700">
-</p>
-
-<p align="center">
-  <img src="screenshots/match-config-targets.png" alt="Match Configuration — Screenshot Targets" width="700">
-</p>
-
-**What you can configure:**
-- **Classification Task** — Camera Angle (8 categories), Match Events (13), Scene Type (11), Tactical Formation (10), or create your own
-- **AI Provider** — OpenAI GPT-4o-mini, Google Gemini Flash, or Manual (free)
-- **Capture Mode** — Full match, Goals Only, or Custom Time Ranges
-- **Capture Preset** — Training Data, Tactical Analysis, Quick Test, or fully Custom targets
-- **Per-Category Targets** — Set exactly how many frames you need for each category (e.g., 50 WIDE_CENTER, 20 MEDIUM, 5 AERIAL)
-
-### Browse by Coach / Player / Team
-Paste a Footballia person or team URL to discover all their matches. Select the ones you want and batch-capture them all at once.
-
-<p align="center">
-  <img src="screenshots/browse-coach-player.png" alt="Browse by Coach / Player / Team" width="700">
-</p>
-
-### Live Capture Dashboard
-Watch the magic happen in real-time. See frames being captured, classified, and sorted — with live progress bars, API health monitoring, and a scrolling classification log.
-
-<p align="center">
-  <img src="screenshots/capture-dashboard.png" alt="Live Capture Dashboard" width="700">
-</p>
-
-### Statistics & Export
-Track your season progress, see camera angle distribution, and export your dataset in standard ML formats with one click.
-
-<p align="center">
-  <img src="screenshots/statistics-export.png" alt="Statistics and Export" width="700">
-</p>
 
 ---
 
@@ -331,6 +262,25 @@ This project is intended for **educational and research purposes only**. It is n
 **Streaming sites:** Only **Footballia** and **local video file** modes are fully supported and tested. Other streaming site integrations are under construction and may not work reliably.
 
 **Legal:** If you have any concerns about the use of this tool or its interaction with any third-party service, please [open an issue](https://github.com/Segundo-Volante/footballia-screenshotter/issues) and we will address it promptly.
+
+---
+
+## Pre-Alpha Changelog
+
+### Screenshotter Pre Alpha Bug Fixes & Feature Updates
+
+#### Bug Fixes
+
+- **macOS file picker could not select `.json` files** — The native AppleScript file dialog used plain extension strings (e.g., `"json"`) which newer macOS versions no longer match. Fixed by adding UTI (Uniform Type Identifier) mappings (e.g., `public.json`, `public.mpeg-4`) so the dialog accepts both formats.
+- **"No targets found" when importing `resample_request.json`** — The import endpoint expected flat JSON keys (`match_url`, `targets`) but the annotation tool exports a nested structure (`match_info.match_url`, `resample_targets[].target_player + sequences[]`). Fixed by supporting both formats with automatic flattening of the nested structure.
+- **`annotation_exporter.py` failed on missing fields** — Fixed field access errors and added fallback defaults so exports no longer crash on incomplete annotation data.
+
+#### New Features
+
+- **Resample target delete buttons** — Added ✕ buttons to each target row in the resample plan view, allowing users to remove individual targets before starting capture. Backend: `DELETE /api/resample/tasks/{task_id}/targets/{target_index}`.
+- **Resample task delete buttons** — Added ✕ buttons to each task card in the resample task list, allowing users to remove entire resample tasks with confirmation. Backend: `DELETE /api/resample/tasks/{task_id}`.
+- **Resample pipeline** — Full backend for resample-based capture: `resample_runner.py` for executing resample tasks, `sequence_manager.py` for managing capture sequences, and new REST endpoints for creating, listing, and managing resample tasks.
+- **Output manager improvements** — Enhanced output organization with better file naming conventions and folder structure for captured frames.
 
 ---
 

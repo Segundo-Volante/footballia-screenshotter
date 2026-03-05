@@ -116,8 +116,8 @@ class AnnotationExporter:
             json.dumps(match_json, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        # Generate frame_metadata.json
-        frame_metadata = self._build_frame_metadata(frames_to_copy)
+        # Generate frame_metadata.json (merges sequence data from capture)
+        frame_metadata = self._build_frame_metadata(frames_to_copy, recording_dir)
         (export_dir / "frame_metadata.json").write_text(
             json.dumps(frame_metadata, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -186,7 +186,7 @@ class AnnotationExporter:
             json.dumps(match_json, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        frame_metadata = self._build_frame_metadata(frames_to_copy)
+        frame_metadata = self._build_frame_metadata(frames_to_copy, recording_dir)
         (export_dir / "frame_metadata.json").write_text(
             json.dumps(frame_metadata, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -321,25 +321,72 @@ class AnnotationExporter:
         }
         return result
 
-    def _build_frame_metadata(self, frames: list[Path]) -> dict:
-        """Build frame_metadata.json from the list of frame files."""
+    def _build_frame_metadata(self, frames: list[Path], recording_dir: Path | None = None) -> dict:
+        """Build frame_metadata.json from the list of frame files.
+
+        If a frame_metadata.json already exists in the recording directory (from
+        the capture pipeline), merge it in so that sequence data, session_info, and
+        per-frame sequence fields are preserved in the annotation bundle.
+        """
+        # Try to load existing capture-time metadata
+        existing_meta: dict = {}
+        existing_frames_by_name: dict[str, dict] = {}
+        if recording_dir:
+            src_meta_path = recording_dir / "frame_metadata.json"
+            if src_meta_path.exists():
+                try:
+                    existing_meta = json.loads(src_meta_path.read_text(encoding="utf-8"))
+                    for fm in existing_meta.get("frames", []):
+                        existing_frames_by_name[fm.get("file_name", "")] = fm
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to read source frame_metadata.json: %s", e)
+
+        # Build exported frame names set (for filtering sequence_summary)
+        exported_names = {f.name for f in frames}
+
+        # Build per-frame entries, merging capture-time data when available
         entries = []
         for f in frames:
-            parsed = parse_frame_filename(f.name)
-            if parsed:
-                entries.append({
-                    "file_name": f.name,
-                    **parsed,
-                })
+            existing = existing_frames_by_name.get(f.name)
+            if existing:
+                # Use the full capture-time record (has sequence_id, etc.)
+                entry = dict(existing)
+                entry["file_name"] = f.name  # ensure consistency
             else:
-                entries.append({
-                    "file_name": f.name,
-                    "video_time": 0,
-                    "camera_angle": "UNKNOWN",
-                    "camera_confidence": 0,
-                    "pre_filled_metadata": {"shot": "wide", "camera": "static"},
-                })
-        return {"frames": entries}
+                # Fallback: parse from filename
+                parsed = parse_frame_filename(f.name)
+                if parsed:
+                    entry = {"file_name": f.name, **parsed}
+                else:
+                    entry = {
+                        "file_name": f.name,
+                        "video_time": 0,
+                        "camera_angle": "UNKNOWN",
+                        "camera_confidence": 0,
+                        "pre_filled_metadata": {"shot": "wide", "camera": "static"},
+                    }
+            entries.append(entry)
+
+        result: dict = {"frames": entries}
+
+        # Carry over top-level metadata from capture
+        if existing_meta.get("schema_version"):
+            result["schema_version"] = existing_meta["schema_version"]
+        if existing_meta.get("session_info"):
+            result["session_info"] = existing_meta["session_info"]
+
+        # Filter sequence_summary to only include sequences that have at least
+        # one frame in the exported bundle
+        if existing_meta.get("sequence_summary"):
+            exported_seq_ids = {
+                e.get("sequence_id") for e in entries if e.get("sequence_id")
+            }
+            result["sequence_summary"] = [
+                s for s in existing_meta["sequence_summary"]
+                if s.get("sequence_id") in exported_seq_ids
+            ]
+
+        return result
 
     def _build_squad_json(self, match: dict, recording_dir: Path) -> tuple[dict, bool]:
         """Build squad.json, auto-populating from lineup.json if available.

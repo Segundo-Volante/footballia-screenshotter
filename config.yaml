@@ -40,3 +40,39 @@ gemini:
 output:
   base_dir: ./recordings
   thumbnail_width: 320
+
+sequence_profiles:
+  wide_annotation:
+    enabled: true
+    trigger:
+      - WIDE_CENTER
+      - WIDE_LEFT
+      - WIDE_RIGHT
+    duration_sec: 10
+    interval_sec: 0.5
+    tolerance_sec: 2.0
+    cooldown_sec: 20
+    purpose: annotation_context
+    skip_classifier_during_capture: true
+
+  medium_reid:
+    enabled: true
+    trigger:
+      - MEDIUM
+    duration_sec: 5
+    interval_sec: 1.0
+    tolerance_sec: 1.0
+    cooldown_sec: 8
+    purpose: reid_training
+    skip_classifier_during_capture: true
+
+  closeup_reid:
+    enabled: true
+    trigger:
+      - CLOSEUP
+    duration_sec: 3
+    interval_sec: 1.5
+    tolerance_sec: 0.5
+    cooldown_sec: 5
+    purpose: reid_training
+    skip_classifier_during_capture: true
