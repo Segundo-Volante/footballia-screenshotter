@@ -66,6 +66,8 @@ Whether you're building a computer vision model, studying tactical formations, o
 
 ### 1. Clone & Install
 
+#### macOS / Linux
+
 ```bash
 git clone https://github.com/Segundo-Volante/footballia-screenshotter.git
 cd footballia-screenshotter
@@ -76,6 +78,27 @@ pip install -r requirements.txt
 # Install browser automation
 playwright install chromium
 ```
+
+#### Windows
+
+```bash
+git clone https://github.com/Segundo-Volante/footballia-screenshotter.git
+cd footballia-screenshotter
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Windows-specific notes (optional)
+pip install -r requirements-windows.txt
+
+# Install browser automation
+playwright install chromium
+```
+
+> **Windows Notes:**
+> - The app automatically handles Windows console encoding (UTF-8), file dialog, and cross-drive file operations.
+> - If `playwright install` fails, try running your terminal as Administrator.
+> - `openpyxl` and `pandas` in `requirements.txt` are optional (legacy Excel import only) — safe to skip if you don't need them.
 
 ### 2. Set Up API Keys *(optional)*
 
@@ -191,6 +214,7 @@ footballia-screenshotter/
 ├── main.py                    # Entry point — starts the server
 ├── config.yaml                # App settings (sampling, browser, AI models)
 ├── requirements.txt           # Python dependencies
+├── requirements-windows.txt   # Windows-specific notes and compatibility
 ├── .env.example               # Template for API keys
 │
 ├── backend/

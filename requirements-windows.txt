@@ -1,0 +1,22 @@
+# Windows-specific requirements for Footballia Screenshotter
+# Install these AFTER requirements.txt on Windows.
+#
+# Usage:
+#   pip install -r requirements.txt
+#   pip install -r requirements-windows.txt
+#   playwright install chromium
+
+# --- Windows console encoding fix ---
+# No extra packages needed — handled automatically by the app at runtime.
+
+# --- Windows-compatible versions ---
+# On Windows, use these pinned versions to avoid known compatibility issues:
+# If playwright install fails, try:
+#   pip install playwright==1.40.0
+#   playwright install chromium
+
+# --- Note on openpyxl/pandas ---
+# These are optional (legacy Excel import only). Safe to skip on Windows
+# if you don't need Excel file support.
+# openpyxl>=3.1.0
+# pandas>=2.0.0
