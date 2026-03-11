@@ -13,8 +13,8 @@ from backend.project_config import ProjectConfig
 from backend.utils import logger
 
 # Camera categories to include in annotation exports
-INCLUDE_CATEGORIES = {"WIDE_CENTER", "WIDE_LEFT", "WIDE_RIGHT", "MEDIUM"}
-EXCLUDE_CATEGORIES = {"CLOSEUP", "OTHER", "AERIAL", "BEHIND_GOAL", "PENDING"}
+INCLUDE_CATEGORIES = {"WIDE_CENTER", "WIDE_LEFT", "WIDE_RIGHT", "MEDIUM", "CLOSEUP"}
+EXCLUDE_CATEGORIES = {"OTHER", "AERIAL", "BEHIND_GOAL", "PENDING"}
 
 
 def parse_frame_filename(filename: str) -> Optional[dict]:
@@ -38,6 +38,9 @@ def parse_frame_filename(filename: str) -> Optional[dict]:
         camera = "pan" if "left" in camera_raw or "right" in camera_raw else "static"
     elif camera_raw == "medium":
         shot = "medium"
+        camera = "static"
+    elif camera_raw == "closeup":
+        shot = "closeup"
         camera = "static"
     else:
         shot = camera_raw
@@ -88,7 +91,7 @@ class AnnotationExporter:
         if not frames_to_copy:
             return {
                 "status": "error",
-                "message": "No useful frames found (only CLOSEUP/OTHER/AERIAL/BEHIND_GOAL)",
+                "message": "No useful frames found (only OTHER/AERIAL/BEHIND_GOAL)",
             }
 
         # Create output directory
@@ -157,7 +160,7 @@ class AnnotationExporter:
         if not frames_to_copy:
             return {
                 "status": "error",
-                "message": "No useful frames found (only CLOSEUP/OTHER/AERIAL/BEHIND_GOAL)",
+                "message": "No useful frames found (only OTHER/AERIAL/BEHIND_GOAL)",
             }
 
         md = match.get("match_day", 0)
